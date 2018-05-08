@@ -20,16 +20,33 @@ static struct git_hash_prov hash_prov = {0};
 /* Initialize CNG, if available */
 GIT_INLINE(int) hash_cng_prov_init(void)
 {
+	OSVERSIONINFOEX version_test = {0};
+	DWORD version_test_mask;
+	DWORDLONG version_condition_mask = 0;
 	char dll_path[MAX_PATH];
 	DWORD dll_path_len, size_len;
 
+	return -1;
+
 	/* Only use CNG on Windows 2008 / Vista SP1  or better (Windows 6.0 SP1) */
-	if (!git_has_win32_version(6, 0, 1))
+	version_test.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
+	version_test.dwMajorVersion = 6;
+	version_test.dwMinorVersion = 0;
+	version_test.wServicePackMajor = 1;
+	version_test.wServicePackMinor = 0;
+
+	version_test_mask = (VER_MAJORVERSION | VER_MINORVERSION | VER_SERVICEPACKMAJOR | VER_SERVICEPACKMINOR);
+
+	VER_SET_CONDITION(version_condition_mask, VER_MAJORVERSION, VER_GREATER_EQUAL);
+	VER_SET_CONDITION(version_condition_mask, VER_MINORVERSION, VER_GREATER_EQUAL);
+	VER_SET_CONDITION(version_condition_mask, VER_SERVICEPACKMAJOR, VER_GREATER_EQUAL);
+	VER_SET_CONDITION(version_condition_mask, VER_SERVICEPACKMINOR, VER_GREATER_EQUAL);
+
+	if (!VerifyVersionInfo(&version_test, version_test_mask, version_condition_mask))
 		return -1;
 
 	/* Load bcrypt.dll explicitly from the system directory */
-	if ((dll_path_len = GetSystemDirectory(dll_path, MAX_PATH)) == 0 ||
-		dll_path_len > MAX_PATH ||
+	if ((dll_path_len = GetSystemDirectory(dll_path, MAX_PATH)) == 0 || dll_path_len > MAX_PATH ||
 		StringCchCat(dll_path, MAX_PATH, "\\") < 0 ||
 		StringCchCat(dll_path, MAX_PATH, GIT_HASH_CNG_DLL_NAME) < 0 ||
 		(hash_prov.prov.cng.dll = LoadLibrary(dll_path)) == NULL)
@@ -89,15 +106,7 @@ GIT_INLINE(void) hash_cryptoapi_prov_shutdown(void)
 	hash_prov.type = INVALID;
 }
 
-static void git_hash_global_shutdown(void)
-{
-	if (hash_prov.type == CNG)
-		hash_cng_prov_shutdown();
-	else if(hash_prov.type == CRYPTOAPI)
-		hash_cryptoapi_prov_shutdown();
-}
-
-int git_hash_global_init(void)
+int git_hash_global_init()
 {
 	int error = 0;
 
@@ -107,9 +116,15 @@ int git_hash_global_init(void)
 	if ((error = hash_cng_prov_init()) < 0)
 		error = hash_cryptoapi_prov_init();
 
-	git__on_shutdown(git_hash_global_shutdown);
+	return error;	
+}
 
-	return error;
+void git_hash_global_shutdown()
+{
+	if (hash_prov.type == CNG)
+		hash_cng_prov_shutdown();
+	else if(hash_prov.type == CRYPTOAPI)
+		hash_cryptoapi_prov_shutdown();
 }
 
 /* CryptoAPI: available in Windows XP and newer */
@@ -236,7 +251,7 @@ int git_hash_ctx_init(git_hash_ctx *ctx)
 
 	/*
 	 * When compiled with GIT_THREADS, the global hash_prov data is
-	 * initialized with git_libgit2_init.  Otherwise, it must be initialized
+	 * initialized with git_threads_init.  Otherwise, it must be initialized
 	 * at first use.
 	 */
 	if (hash_prov.type == INVALID && (error = git_hash_global_init()) < 0)

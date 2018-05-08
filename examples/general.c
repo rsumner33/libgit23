@@ -1,17 +1,3 @@
-/*
- * libgit2 "general" example - shows basic libgit2 concepts
- *
- * Written by the libgit2 contributors
- *
- * To the extent possible under law, the author(s) have dedicated all copyright
- * and related and neighboring rights to this software to the public domain
- * worldwide. This software is distributed without any warranty.
- *
- * You should have received a copy of the CC0 Public Domain Dedication along
- * with this software. If not, see
- * <http://creativecommons.org/publicdomain/zero/1.0/>.
- */
-
 // [**libgit2**][lg] is a portable, pure C implementation of the Git core
 // methods provided as a re-entrant linkable library with a solid API,
 // allowing you to write native speed custom Git applications in any
@@ -47,9 +33,10 @@
 // as an example.
 static void check_error(int error_code, const char *action)
 {
-	const git_error *error = giterr_last();
 	if (!error_code)
 		return;
+
+	const git_error *error = giterr_last();
 
 	printf("Error %d %s - %s\n", error_code, action,
 		   (error && error->message) ? error->message : "???");
@@ -59,17 +46,13 @@ static void check_error(int error_code, const char *action)
 
 int main (int argc, char** argv)
 {
-  // Initialize the library, this will set up any global state which libgit2 needs
-  // including threading and crypto
-  git_libgit2_init();
-
   // ### Opening the Repository
 
   // There are a couple of methods for opening a repository, this being the
   // simplest.  There are also [methods][me] for specifying the index file
   // and work tree locations, here we assume they are in the normal places.
 	//
-	// (Try running this program against tests/resources/testrepo.git.)
+	// (Try running this program against tests-clar/resources/testrepo.git.)
   //
   // [me]: http://libgit2.github.com/libgit2/#HEAD/group/repository
   int error;
@@ -98,8 +81,8 @@ int main (int argc, char** argv)
   // Next we will convert the 20 byte raw SHA1 value to a human readable 40
   // char hex value.
   printf("\n*Raw to Hex*\n");
-  char out[GIT_OID_HEXSZ+1];
-  out[GIT_OID_HEXSZ] = '\0';
+  char out[41];
+  out[40] = '\0';
 
   // If you have a oid, you can easily get the hex value of the SHA as well.
   git_oid_fmt(out, &oid);
@@ -126,7 +109,7 @@ int main (int argc, char** argv)
 
   // We can read raw objects directly from the object database if we have
   // the oid (SHA) of the object.  This allows us to access objects without
-  // knowing their type and inspect the raw bytes unparsed.
+  // knowing thier type and inspect the raw bytes unparsed.
   error = git_odb_read(&obj, odb, &oid);
   check_error(error, "finding object in repository");
 
@@ -402,7 +385,7 @@ int main (int argc, char** argv)
 
   // Now that we have the starting point pushed onto the walker, we start
   // asking for ancestors. It will return them in the sorting order we asked
-  // for as commit oids.  We can then lookup and parse the committed pointed
+  // for as commit oids.  We can then lookup and parse the commited pointed
   // at by the returned OID; note that this operation is specially fast
   // since the raw contents of the commit object will be cached in memory
   while ((git_revwalk_next(&oid, walk)) == 0) {
@@ -470,7 +453,7 @@ int main (int argc, char** argv)
   // Here we will implement something like `git for-each-ref` simply listing
   // out all available references and the object SHA they resolve to.
   git_strarray ref_list;
-  git_reference_list(&ref_list, repo);
+  git_reference_list(&ref_list, repo, GIT_REF_LISTALL);
 
   const char *refname;
   git_reference *ref;

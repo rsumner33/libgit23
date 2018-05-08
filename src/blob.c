@@ -11,7 +11,6 @@
 #include "git2/odb_backend.h"
 
 #include "common.h"
-#include "filebuf.h"
 #include "blob.h"
 #include "filter.h"
 #include "buf_text.h"
@@ -50,46 +49,42 @@ int git_blob__parse(void *blob, git_odb_object *odb_obj)
 	return 0;
 }
 
-int git_blob_create_frombuffer(
-	git_oid *id, git_repository *repo, const void *buffer, size_t len)
+int git_blob_create_frombuffer(git_oid *oid, git_repository *repo, const void *buffer, size_t len)
 {
 	int error;
 	git_odb *odb;
 	git_odb_stream *stream;
 
-	assert(id && repo);
-
 	if ((error = git_repository_odb__weakptr(&odb, repo)) < 0 ||
 		(error = git_odb_open_wstream(&stream, odb, len, GIT_OBJ_BLOB)) < 0)
 		return error;
 
-	if ((error = git_odb_stream_write(stream, buffer, len)) == 0)
-		error = git_odb_stream_finalize_write(id, stream);
+	if ((error = stream->write(stream, buffer, len)) == 0)
+		error = stream->finalize_write(oid, stream);
 
-	git_odb_stream_free(stream);
+	stream->free(stream);
 	return error;
 }
 
 static int write_file_stream(
-	git_oid *id, git_odb *odb, const char *path, git_off_t file_size)
+	git_oid *oid, git_odb *odb, const char *path, git_off_t file_size)
 {
 	int fd, error;
-	char buffer[FILEIO_BUFSIZE];
+	char buffer[4096];
 	git_odb_stream *stream = NULL;
-	ssize_t read_len = -1;
-	git_off_t written = 0;
+	ssize_t read_len = -1, written = 0;
 
 	if ((error = git_odb_open_wstream(
-			&stream, odb, file_size, GIT_OBJ_BLOB)) < 0)
+			&stream, odb, (size_t)file_size, GIT_OBJ_BLOB)) < 0)
 		return error;
 
 	if ((fd = git_futils_open_ro(path)) < 0) {
-		git_odb_stream_free(stream);
+		stream->free(stream);
 		return -1;
 	}
 
 	while (!error && (read_len = p_read(fd, buffer, sizeof(buffer))) > 0) {
-		error = git_odb_stream_write(stream, buffer, read_len);
+		error = stream->write(stream, buffer, read_len);
 		written += read_len;
 	}
 
@@ -101,37 +96,41 @@ static int write_file_stream(
 	}
 
 	if (!error)
-		error = git_odb_stream_finalize_write(id, stream);
+		error = stream->finalize_write(oid, stream);
 
-	git_odb_stream_free(stream);
+	stream->free(stream);
 	return error;
 }
 
 static int write_file_filtered(
-	git_oid *id,
-	git_off_t *size,
+	git_oid *oid,
 	git_odb *odb,
 	const char *full_path,
-	git_filter_list *fl)
+	git_vector *filters)
 {
 	int error;
-	git_buf tgt = GIT_BUF_INIT;
+	git_buf source = GIT_BUF_INIT;
+	git_buf dest = GIT_BUF_INIT;
 
-	error = git_filter_list_apply_to_file(&tgt, fl, NULL, full_path);
+	if ((error = git_futils_readbuffer(&source, full_path)) < 0)
+		return error;
+
+	error = git_filters_apply(&dest, &source, filters);
+
+	/* Free the source as soon as possible. This can be big in memory,
+	 * and we don't want to ODB write to choke */
+	git_buf_free(&source);
 
 	/* Write the file to disk if it was properly filtered */
-	if (!error) {
-		*size = tgt.size;
+	if (!error)
+		error = git_odb_write(oid, odb, dest.ptr, dest.size, GIT_OBJ_BLOB);
 
-		error = git_odb_write(id, odb, tgt.ptr, tgt.size, GIT_OBJ_BLOB);
-	}
-
-	git_buf_free(&tgt);
+	git_buf_free(&dest);
 	return error;
 }
 
 static int write_symlink(
-	git_oid *id, git_odb *odb, const char *path, size_t link_size)
+	git_oid *oid, git_odb *odb, const char *path, size_t link_size)
 {
 	char *link_data;
 	ssize_t read_len;
@@ -147,79 +146,50 @@ static int write_symlink(
 		return -1;
 	}
 
-	error = git_odb_write(id, odb, (void *)link_data, link_size, GIT_OBJ_BLOB);
+	error = git_odb_write(oid, odb, (void *)link_data, link_size, GIT_OBJ_BLOB);
 	git__free(link_data);
 	return error;
 }
 
-int git_blob__create_from_paths(
-	git_oid *id,
-	struct stat *out_st,
-	git_repository *repo,
-	const char *content_path,
-	const char *hint_path,
-	mode_t hint_mode,
-	bool try_load_filters)
+static int blob_create_internal(git_oid *oid, git_repository *repo, const char *content_path, const char *hint_path, bool try_load_filters)
 {
 	int error;
 	struct stat st;
 	git_odb *odb = NULL;
 	git_off_t size;
-	mode_t mode;
-	git_buf path = GIT_BUF_INIT;
 
 	assert(hint_path || !try_load_filters);
 
-	if (!content_path) {
-		if (git_repository__ensure_not_bare(repo, "create blob from file") < 0)
-			return GIT_EBAREREPO;
-
-		if (git_buf_joinpath(
-				&path, git_repository_workdir(repo), hint_path) < 0)
-			return -1;
-
-		content_path = path.ptr;
-	}
-
-	if ((error = git_path_lstat(content_path, &st)) < 0 ||
-		(error = git_repository_odb(&odb, repo)) < 0)
-		goto done;
-
-	if (S_ISDIR(st.st_mode)) {
-		giterr_set(GITERR_ODB, "cannot create blob from '%s'; it is a directory", content_path);
-		error = GIT_EDIRECTORY;
-		goto done;
-	}
-
-	if (out_st)
-		memcpy(out_st, &st, sizeof(st));
+	if ((error = git_path_lstat(content_path, &st)) < 0 || (error = git_repository_odb__weakptr(&odb, repo)) < 0)
+		return error;
 
 	size = st.st_size;
-	mode = hint_mode ? hint_mode : st.st_mode;
 
-	if (S_ISLNK(mode)) {
-		error = write_symlink(id, odb, content_path, (size_t)size);
+	if (S_ISLNK(st.st_mode)) {
+		error = write_symlink(oid, odb, content_path, (size_t)size);
 	} else {
-		git_filter_list *fl = NULL;
+		git_vector write_filters = GIT_VECTOR_INIT;
+		int filter_count = 0;
 
-		if (try_load_filters)
+		if (try_load_filters) {
 			/* Load the filters for writing this file to the ODB */
-			error = git_filter_list_load(
-				&fl, repo, NULL, hint_path,
-				GIT_FILTER_TO_ODB, GIT_FILTER_DEFAULT);
+			filter_count = git_filters_load(
+				&write_filters, repo, hint_path, GIT_FILTER_TO_ODB);
+		}
 
-		if (error < 0)
-			/* well, that didn't work */;
-		else if (fl == NULL)
+		if (filter_count < 0) {
+			/* Negative value means there was a critical error */
+			error = filter_count;
+		} else if (filter_count == 0) {
 			/* No filters need to be applied to the document: we can stream
 			 * directly from disk */
-			error = write_file_stream(id, odb, content_path, size);
-		else {
+			error = write_file_stream(oid, odb, content_path, size);
+		} else {
 			/* We need to apply one or more filters */
-			error = write_file_filtered(id, &size, odb, content_path, fl);
-
-			git_filter_list_free(fl);
+			error = write_file_filtered(oid, odb, content_path, &write_filters);
 		}
+
+		git_filters_free(&write_filters);
 
 		/*
 		 * TODO: eventually support streaming filtered files, for files
@@ -236,21 +206,34 @@ int git_blob__create_from_paths(
 		 */
 	}
 
-done:
-	git_odb_free(odb);
-	git_buf_free(&path);
-
 	return error;
 }
 
-int git_blob_create_fromworkdir(
-	git_oid *id, git_repository *repo, const char *path)
+int git_blob_create_fromworkdir(git_oid *oid, git_repository *repo, const char *path)
 {
-	return git_blob__create_from_paths(id, NULL, repo, NULL, path, 0, true);
+	git_buf full_path = GIT_BUF_INIT;
+	const char *workdir;
+	int error;
+
+	if ((error = git_repository__ensure_not_bare(repo, "create blob from file")) < 0)
+		return error;
+
+	workdir = git_repository_workdir(repo);
+
+	if (git_buf_joinpath(&full_path, workdir, path) < 0) {
+		git_buf_free(&full_path);
+		return -1;
+	}
+
+	error = blob_create_internal(
+		oid, repo, git_buf_cstr(&full_path),
+		git_buf_cstr(&full_path) + strlen(workdir), true);
+
+	git_buf_free(&full_path);
+	return error;
 }
 
-int git_blob_create_fromdisk(
-	git_oid *id, git_repository *repo, const char *path)
+int git_blob_create_fromdisk(git_oid *oid, git_repository *repo, const char *path)
 {
 	int error;
 	git_buf full_path = GIT_BUF_INIT;
@@ -267,8 +250,8 @@ int git_blob_create_fromdisk(
 	if (workdir && !git__prefixcmp(hintpath, workdir))
 		hintpath += strlen(workdir);
 
-	error = git_blob__create_from_paths(
-		id, NULL, repo, git_buf_cstr(&full_path), hintpath, 0, true);
+	error = blob_create_internal(
+		oid, repo, git_buf_cstr(&full_path), hintpath, true);
 
 	git_buf_free(&full_path);
 	return error;
@@ -277,99 +260,65 @@ int git_blob_create_fromdisk(
 #define BUFFER_SIZE 4096
 
 int git_blob_create_fromchunks(
-	git_oid *id,
+	git_oid *oid,
 	git_repository *repo,
 	const char *hintpath,
 	int (*source_cb)(char *content, size_t max_length, void *payload),
 	void *payload)
 {
-	int error;
+	int error = -1, read_bytes;
 	char *content = NULL;
 	git_filebuf file = GIT_FILEBUF_INIT;
 	git_buf path = GIT_BUF_INIT;
 
-	assert(id && repo && source_cb);
-
-	if ((error = git_buf_joinpath(
-			&path, git_repository_path(repo), GIT_OBJECTS_DIR "streamed")) < 0)
-		goto cleanup;
+	if (git_buf_join_n(
+		&path, '/', 3, 
+		git_repository_path(repo),
+		GIT_OBJECTS_DIR, 
+		"streamed") < 0)
+			goto cleanup;
 
 	content = git__malloc(BUFFER_SIZE);
 	GITERR_CHECK_ALLOC(content);
 
-	if ((error = git_filebuf_open(
-			&file, git_buf_cstr(&path), GIT_FILEBUF_TEMPORARY, 0666)) < 0)
+	if (git_filebuf_open(&file, git_buf_cstr(&path), GIT_FILEBUF_TEMPORARY) < 0)
 		goto cleanup;
 
 	while (1) {
-		int read_bytes = source_cb(content, BUFFER_SIZE, payload);
+		read_bytes = source_cb(content, BUFFER_SIZE, payload);
 
-		if (!read_bytes)
+		assert(read_bytes <= BUFFER_SIZE);
+
+		if (read_bytes <= 0)
 			break;
 
-		if (read_bytes > BUFFER_SIZE) {
-			giterr_set(GITERR_OBJECT, "Invalid chunk size while creating blob");
-			error = GIT_EBUFS;
-		} else if (read_bytes < 0) {
-			error = giterr_set_after_callback(read_bytes);
-		} else {
-			error = git_filebuf_write(&file, content, read_bytes);
-		}
-
-		if (error < 0)
+		if (git_filebuf_write(&file, content, read_bytes) < 0)
 			goto cleanup;
 	}
 
-	if ((error = git_filebuf_flush(&file)) < 0)
+	if (read_bytes < 0)
 		goto cleanup;
 
-	error = git_blob__create_from_paths(
-		id, NULL, repo, file.path_lock, hintpath, 0, hintpath != NULL);
+	if (git_filebuf_flush(&file) < 0)
+		goto cleanup;
+
+	error = blob_create_internal(oid, repo, file.path_lock, hintpath, hintpath != NULL);
 
 cleanup:
 	git_buf_free(&path);
 	git_filebuf_cleanup(&file);
 	git__free(content);
-
 	return error;
 }
 
-int git_blob_is_binary(const git_blob *blob)
+int git_blob_is_binary(git_blob *blob)
 {
-	git_buf content = GIT_BUF_INIT;
+	git_buf content;
 
 	assert(blob);
 
-	git_buf_attach_notowned(&content, blob->odb_object->buffer,
-		min(blob->odb_object->cached.size,
-		GIT_FILTER_BYTES_TO_CHECK_NUL));
+	content.ptr = blob->odb_object->buffer;
+	content.size = min(blob->odb_object->cached.size, 4000);
+
 	return git_buf_text_is_binary(&content);
-}
-
-int git_blob_filtered_content(
-	git_buf *out,
-	git_blob *blob,
-	const char *path,
-	int check_for_binary_data)
-{
-	int error = 0;
-	git_filter_list *fl = NULL;
-
-	assert(blob && path && out);
-
-	git_buf_sanitize(out);
-
-	if (check_for_binary_data && git_blob_is_binary(blob))
-		return 0;
-
-	if (!(error = git_filter_list_load(
-			&fl, git_blob_owner(blob), blob, path,
-			GIT_FILTER_TO_WORKTREE, GIT_FILTER_DEFAULT))) {
-
-		error = git_filter_list_apply_to_blob(out, fl, blob);
-
-		git_filter_list_free(fl);
-	}
-
-	return error;
 }

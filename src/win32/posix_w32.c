@@ -5,108 +5,20 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 #include "../posix.h"
-#include "../fileops.h"
 #include "path.h"
-#include "path_w32.h"
 #include "utf-conv.h"
 #include "repository.h"
-#include "reparse.h"
-#include "global.h"
-#include "buffer.h"
 #include <errno.h>
 #include <io.h>
 #include <fcntl.h>
 #include <ws2tcpip.h>
 
-#ifndef FILE_NAME_NORMALIZED
-# define FILE_NAME_NORMALIZED 0
-#endif
-
-#ifndef IO_REPARSE_TAG_SYMLINK
-#define IO_REPARSE_TAG_SYMLINK (0xA000000CL)
-#endif
-
-/* Options which we always provide to _wopen.
- *
- * _O_BINARY - Raw access; no translation of CR or LF characters
- * _O_NOINHERIT - Do not mark the created handle as inheritable by child processes.
- *    The Windows default is 'not inheritable', but the CRT's default (following
- *    POSIX convention) is 'inheritable'. We have no desire for our handles to be
- *    inheritable on Windows, so specify the flag to get default behavior back. */
-#define STANDARD_OPEN_FLAGS (_O_BINARY | _O_NOINHERIT)
-
-/* Allowable mode bits on Win32.  Using mode bits that are not supported on
- * Win32 (eg S_IRWXU) is generally ignored, but Wine warns loudly about it
- * so we simply remove them.
- */
-#define WIN32_MODE_MASK (_S_IREAD | _S_IWRITE)
-
-/* GetFinalPathNameByHandleW signature */
-typedef DWORD(WINAPI *PFGetFinalPathNameByHandleW)(HANDLE, LPWSTR, DWORD, DWORD);
-
-/**
- * Truncate or extend file.
- *
- * We now take a "git_off_t" rather than "long" because
- * files may be longer than 2Gb.
- */
-int p_ftruncate(int fd, git_off_t size)
-{
-	if (size < 0) {
-		errno = EINVAL;
-		return -1;
-	}
-
-#if !defined(__MINGW32__) || defined(MINGW_HAS_SECURE_API)
-	return ((_chsize_s(fd, size) == 0) ? 0 : -1);
-#else
-	/* TODO MINGW32 Find a replacement for _chsize() that handles big files. */
-	if (size > INT32_MAX) {
-		errno = EFBIG;
-		return -1;
-	}
-	return _chsize(fd, (long)size);
-#endif
-}
-
-int p_mkdir(const char *path, mode_t mode)
-{
-	git_win32_path buf;
-
-	GIT_UNUSED(mode);
-
-	if (git_win32_path_from_utf8(buf, path) < 0)
-		return -1;
-
-	return _wmkdir(buf);
-}
-
-int p_link(const char *old, const char *new)
-{
-	GIT_UNUSED(old);
-	GIT_UNUSED(new);
-	errno = ENOSYS;
-	return -1;
-}
-
 int p_unlink(const char *path)
 {
-	git_win32_path buf;
-	int error;
-
-	if (git_win32_path_from_utf8(buf, path) < 0)
-		return -1;
-
-	error = _wunlink(buf);
-
-	/* If the file could not be deleted because it was
-	 * read-only, clear the bit and try again */
-	if (error == -1 && errno == EACCES) {
-		_wchmod(buf, 0666);
-		error = _wunlink(buf);
-	}
-
-	return error;
+	wchar_t buf[GIT_WIN_PATH];
+	git__utf8_to_16(buf, GIT_WIN_PATH, path);
+	_wchmod(buf, 0666);
+	return _wunlink(buf);
 }
 
 int p_fsync(int fd)
@@ -132,45 +44,98 @@ int p_fsync(int fd)
 	return 0;
 }
 
+GIT_INLINE(time_t) filetime_to_time_t(const FILETIME *ft)
+{
+	long long winTime = ((long long)ft->dwHighDateTime << 32) + ft->dwLowDateTime;
+	winTime -= 116444736000000000LL; /* Windows to Unix Epoch conversion */
+	winTime /= 10000000;		 /* Nano to seconds resolution */
+	return (time_t)winTime;
+}
+
 #define WIN32_IS_WSEP(CH) ((CH) == L'/' || (CH) == L'\\')
 
-static int lstat_w(
-	wchar_t *path,
-	struct stat *buf,
-	bool posix_enotdir)
+static int do_lstat(
+	const char *file_name, struct stat *buf, int posix_enotdir)
 {
 	WIN32_FILE_ATTRIBUTE_DATA fdata;
+	wchar_t fbuf[GIT_WIN_PATH], lastch;
+	int flen;
 
-	if (GetFileAttributesExW(path, GetFileExInfoStandard, &fdata)) {
+	flen = git__utf8_to_16(fbuf, GIT_WIN_PATH, file_name);
+
+	/* truncate trailing slashes */
+	for (; flen > 0; --flen) {
+		lastch = fbuf[flen - 1];
+		if (WIN32_IS_WSEP(lastch))
+			fbuf[flen - 1] = L'\0';
+		else if (lastch != L'\0')
+			break;
+	}
+
+	if (GetFileAttributesExW(fbuf, GetFileExInfoStandard, &fdata)) {
+		int fMode = S_IREAD;
+
 		if (!buf)
 			return 0;
 
-		return git_win32__file_attribute_to_stat(buf, &fdata, path);
+		if (fdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+			fMode |= S_IFDIR;
+		else
+			fMode |= S_IFREG;
+
+		if (!(fdata.dwFileAttributes & FILE_ATTRIBUTE_READONLY))
+			fMode |= S_IWRITE;
+
+		if (fdata.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+			fMode |= S_IFLNK;
+
+		buf->st_ino = 0;
+		buf->st_gid = 0;
+		buf->st_uid = 0;
+		buf->st_nlink = 1;
+		buf->st_mode = (mode_t)fMode;
+		buf->st_size = ((git_off_t)fdata.nFileSizeHigh << 32) + fdata.nFileSizeLow;
+		buf->st_dev = buf->st_rdev = (_getdrive() - 1);
+		buf->st_atime = filetime_to_time_t(&(fdata.ftLastAccessTime));
+		buf->st_mtime = filetime_to_time_t(&(fdata.ftLastWriteTime));
+		buf->st_ctime = filetime_to_time_t(&(fdata.ftCreationTime));
+
+		/* Windows symlinks have zero file size, call readlink to determine
+		 * the length of the path pointed to, which we expect everywhere else
+		 */
+		if (S_ISLNK(fMode)) {
+			char target[GIT_WIN_PATH];
+			int readlink_result;
+
+			readlink_result = p_readlink(file_name, target, GIT_WIN_PATH);
+
+			if (readlink_result == -1)
+				return -1;
+
+			buf->st_size = strlen(target);
+		}
+
+		return 0;
 	}
 
 	errno = ENOENT;
 
-	/* To match POSIX behavior, set ENOTDIR when any of the folders in the
-	 * file path is a regular file, otherwise set ENOENT.
+	/* We need POSIX behavior, then ENOTDIR must set when any of the folders in the
+	 * file path is a regular file,otherwise ENOENT must be set.
 	 */
 	if (posix_enotdir) {
-		size_t path_len = wcslen(path);
-
 		/* scan up path until we find an existing item */
 		while (1) {
-			DWORD attrs;
-
 			/* remove last directory component */
-			for (path_len--; path_len > 0 && !WIN32_IS_WSEP(path[path_len]); path_len--);
+			for (--flen; flen > 0 && !WIN32_IS_WSEP(fbuf[flen]); --flen);
 
-			if (path_len <= 0)
+			if (flen <= 0)
 				break;
 
-			path[path_len] = L'\0';
-			attrs = GetFileAttributesW(path);
+			fbuf[flen] = L'\0';
 
-			if (attrs != INVALID_FILE_ATTRIBUTES) {
-				if (!(attrs & FILE_ATTRIBUTE_DIRECTORY))
+			if (GetFileAttributesExW(fbuf, GetFileExInfoStandard, &fdata)) {
+				if (!(fdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
 					errno = ENOTDIR;
 				break;
 			}
@@ -180,89 +145,99 @@ static int lstat_w(
 	return -1;
 }
 
-static int do_lstat(const char *path, struct stat *buf, bool posixly_correct)
-{
-	git_win32_path path_w;
-	int len;
-
-	if ((len = git_win32_path_from_utf8(path_w, path)) < 0)
-		return -1;
-
-	git_win32__path_trim_end(path_w, len);
-
-	return lstat_w(path_w, buf, posixly_correct);
-}
-
 int p_lstat(const char *filename, struct stat *buf)
 {
-	return do_lstat(filename, buf, false);
+	return do_lstat(filename, buf, 0);
 }
 
 int p_lstat_posixly(const char *filename, struct stat *buf)
 {
-	return do_lstat(filename, buf, true);
+	return do_lstat(filename, buf, 1);
 }
 
-int p_utimes(const char *filename, const struct timeval times[2])
+int p_readlink(const char *link, char *target, size_t target_len)
 {
-	int fd, error;
+	typedef DWORD (WINAPI *fpath_func)(HANDLE, LPWSTR, DWORD, DWORD);
+	static fpath_func pGetFinalPath = NULL;
+	HANDLE hFile;
+	DWORD dwRet;
+	wchar_t link_w[GIT_WIN_PATH];
+	wchar_t* target_w;
+	int error = 0;
 
-	if ((fd = p_open(filename, O_RDWR)) < 0)
-		return fd;
+	assert(link && target && target_len > 0);
 
-	error = p_futimes(fd, times);
+	/*
+	 * Try to load the pointer to pGetFinalPath dynamically, because
+	 * it is not available in platforms older than Vista
+	 */
+	if (pGetFinalPath == NULL) {
+		HMODULE module = GetModuleHandle("kernel32");
 
-	close(fd);
-	return error;
-}
+		if (module != NULL)
+			pGetFinalPath = (fpath_func)GetProcAddress(module, "GetFinalPathNameByHandleW");
 
-int p_futimes(int fd, const struct timeval times[2])
-{
-	HANDLE handle;
-	FILETIME atime = {0}, mtime = {0};
-
-	if (times == NULL) {
-		SYSTEMTIME st;
-
-		GetSystemTime(&st);
-		SystemTimeToFileTime(&st, &atime);
-		SystemTimeToFileTime(&st, &mtime);
-	} else {
-		git_win32__timeval_to_filetime(&atime, times[0]);
-		git_win32__timeval_to_filetime(&mtime, times[1]);
+		if (pGetFinalPath == NULL) {
+			giterr_set(GITERR_OS,
+				"'GetFinalPathNameByHandleW' is not available in this platform");
+			return -1;
+		}
 	}
 
-	if ((handle = (HANDLE)_get_osfhandle(fd)) == INVALID_HANDLE_VALUE)
+	git__utf8_to_16(link_w, GIT_WIN_PATH, link);
+
+	hFile = CreateFileW(link_w,			// file to open
+			GENERIC_READ,			// open for reading
+			FILE_SHARE_READ,		// share for reading
+			NULL,					// default security
+			OPEN_EXISTING,			// existing file only
+			FILE_FLAG_BACKUP_SEMANTICS, // normal file
+			NULL);					// no attr. template
+
+	if (hFile == INVALID_HANDLE_VALUE) {
+		giterr_set(GITERR_OS, "Cannot open '%s' for reading", link);
 		return -1;
+	}
 
-	if (SetFileTime(handle, NULL, &atime, &mtime) == 0)
-		return -1;
+	target_w = (wchar_t*)git__malloc(target_len * sizeof(wchar_t));
+	GITERR_CHECK_ALLOC(target_w);
 
-	return 0;
-}
+	dwRet = pGetFinalPath(hFile, target_w, (DWORD)target_len, 0x0);
+	if (dwRet == 0 ||
+		dwRet >= target_len ||
+		!WideCharToMultiByte(CP_UTF8, 0, target_w, -1, target,
+			(int)(target_len * sizeof(char)), NULL, NULL))
+		error = -1;
 
-int p_readlink(const char *path, char *buf, size_t bufsiz)
-{
-	git_win32_path path_w, target_w;
-	git_win32_utf8_path target;
-	int len;
+	git__free(target_w);
+	CloseHandle(hFile);
 
-	/* readlink(2) does not NULL-terminate the string written
-	 * to the target buffer. Furthermore, the target buffer need
-	 * not be large enough to hold the entire result. A truncated
-	 * result should be written in this case. Since this truncation
-	 * could occur in the middle of the encoding of a code point,
-	 * we need to buffer the result on the stack. */
+	if (error)
+		return error;
 
-	if (git_win32_path_from_utf8(path_w, path) < 0 ||
-		git_win32_path_readlink_w(target_w, path_w) < 0 ||
-		(len = git_win32_path_to_utf8(target, target_w)) < 0)
-		return -1;
+	/* Skip first 4 characters if they are "\\?\" */
+	if (dwRet > 4 &&
+		target[0] == '\\' && target[1] == '\\' &&
+		target[2] == '?' && target[3] == '\\')
+	{
+		unsigned int offset = 4;
+		dwRet -= 4;
 
-	bufsiz = min((size_t)len, bufsiz);
-	memcpy(buf, target, bufsiz);
+		/* \??\UNC\ */
+		if (dwRet > 7 &&
+			target[4] == 'U' && target[5] == 'N' && target[6] == 'C')
+		{
+			offset += 2;
+			dwRet -= 2;
+			target[offset] = '\\';
+		}
 
-	return (int)bufsiz;
+		memmove(target, target + offset, dwRet);
+	}
+
+	target[dwRet] = '\0';
+
+	return dwRet;
 }
 
 int p_symlink(const char *old, const char *new)
@@ -275,11 +250,10 @@ int p_symlink(const char *old, const char *new)
 
 int p_open(const char *path, int flags, ...)
 {
-	git_win32_path buf;
+	wchar_t buf[GIT_WIN_PATH];
 	mode_t mode = 0;
 
-	if (git_win32_path_from_utf8(buf, path) < 0)
-		return -1;
+	git__utf8_to_16(buf, GIT_WIN_PATH, path);
 
 	if (flags & O_CREAT) {
 		va_list arg_list;
@@ -289,231 +263,120 @@ int p_open(const char *path, int flags, ...)
 		va_end(arg_list);
 	}
 
-	return _wopen(buf, flags | STANDARD_OPEN_FLAGS, mode & WIN32_MODE_MASK);
+	return _wopen(buf, flags | _O_BINARY, mode);
 }
 
 int p_creat(const char *path, mode_t mode)
 {
-	git_win32_path buf;
-
-	if (git_win32_path_from_utf8(buf, path) < 0)
-		return -1;
-
-	return _wopen(buf,
-		_O_WRONLY | _O_CREAT | _O_TRUNC | STANDARD_OPEN_FLAGS,
-		mode & WIN32_MODE_MASK);
+	wchar_t buf[GIT_WIN_PATH];
+	git__utf8_to_16(buf, GIT_WIN_PATH, path);
+	return _wopen(buf, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, mode);
 }
 
 int p_getcwd(char *buffer_out, size_t size)
 {
-	git_win32_path buf;
-	wchar_t *cwd = _wgetcwd(buf, GIT_WIN_PATH_UTF16);
+	int ret;
+	wchar_t *buf;
 
-	if (!cwd)
+	if ((size_t)((int)size) != size)
 		return -1;
 
-	/* Convert the working directory back to UTF-8 */
-	if (git__utf16_to_8(buffer_out, size, cwd) < 0) {
-		DWORD code = GetLastError();
+	buf = (wchar_t*)git__malloc(sizeof(wchar_t) * (int)size);
+	GITERR_CHECK_ALLOC(buf);
 
-		if (code == ERROR_INSUFFICIENT_BUFFER)
-			errno = ERANGE;
-		else
-			errno = EINVAL;
+	_wgetcwd(buf, (int)size);
 
-		return -1;
-	}
+	ret = WideCharToMultiByte(
+		CP_UTF8, 0, buf, -1, buffer_out, (int)size, NULL, NULL);
 
-	return 0;
-}
-
-/*
- * Returns the address of the GetFinalPathNameByHandleW function.
- * This function is available on Windows Vista and higher.
- */
-static PFGetFinalPathNameByHandleW get_fpnbyhandle(void)
-{
-	static PFGetFinalPathNameByHandleW pFunc = NULL;
-	PFGetFinalPathNameByHandleW toReturn = pFunc;
-
-	if (!toReturn) {
-		HMODULE hModule = GetModuleHandleW(L"kernel32");
-
-		if (hModule)
-			toReturn = (PFGetFinalPathNameByHandleW)GetProcAddress(hModule, "GetFinalPathNameByHandleW");
-
-		pFunc = toReturn;
-	}
-
-	assert(toReturn);
-
-	return toReturn;
-}
-
-static int getfinalpath_w(
-	git_win32_path dest,
-	const wchar_t *path)
-{
-	PFGetFinalPathNameByHandleW pgfp = get_fpnbyhandle();
-	HANDLE hFile;
-	DWORD dwChars;
-
-	if (!pgfp)
-		return -1;
-
-	/* Use FILE_FLAG_BACKUP_SEMANTICS so we can open a directory. Do not
-	* specify FILE_FLAG_OPEN_REPARSE_POINT; we want to open a handle to the
-	* target of the link. */
-	hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-		NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-
-	if (INVALID_HANDLE_VALUE == hFile)
-		return -1;
-
-	/* Call GetFinalPathNameByHandle */
-	dwChars = pgfp(hFile, dest, GIT_WIN_PATH_UTF16, FILE_NAME_NORMALIZED);
-	CloseHandle(hFile);
-
-	if (!dwChars || dwChars >= GIT_WIN_PATH_UTF16)
-		return -1;
-
-	/* The path may be delivered to us with a prefix; canonicalize */
-	return (int)git_win32__canonicalize_path(dest, dwChars);
-}
-
-static int follow_and_lstat_link(git_win32_path path, struct stat* buf)
-{
-	git_win32_path target_w;
-
-	if (getfinalpath_w(target_w, path) < 0)
-		return -1;
-
-	return lstat_w(target_w, buf, false);
+	git__free(buf);
+	return !ret ? -1 : 0;
 }
 
 int p_stat(const char* path, struct stat* buf)
 {
-	git_win32_path path_w;
-	int len;
-
-	if ((len = git_win32_path_from_utf8(path_w, path)) < 0 ||
-		lstat_w(path_w, buf, false) < 0)
-		return -1;
-
-	/* The item is a symbolic link or mount point. No need to iterate
-	 * to follow multiple links; use GetFinalPathNameFromHandle. */
-	if (S_ISLNK(buf->st_mode))
-		return follow_and_lstat_link(path_w, buf);
-
-	return 0;
+	return do_lstat(path, buf, 0);
 }
 
 int p_chdir(const char* path)
 {
-	git_win32_path buf;
-
-	if (git_win32_path_from_utf8(buf, path) < 0)
-		return -1;
-
+	wchar_t buf[GIT_WIN_PATH];
+	git__utf8_to_16(buf, GIT_WIN_PATH, path);
 	return _wchdir(buf);
 }
 
 int p_chmod(const char* path, mode_t mode)
 {
-	git_win32_path buf;
-
-	if (git_win32_path_from_utf8(buf, path) < 0)
-		return -1;
-
+	wchar_t buf[GIT_WIN_PATH];
+	git__utf8_to_16(buf, GIT_WIN_PATH, path);
 	return _wchmod(buf, mode);
 }
 
 int p_rmdir(const char* path)
 {
-	git_win32_path buf;
-	int error;
+	wchar_t buf[GIT_WIN_PATH];
+	git__utf8_to_16(buf, GIT_WIN_PATH, path);
+	return _wrmdir(buf);
+}
 
-	if (git_win32_path_from_utf8(buf, path) < 0)
-		return -1;
-
-	error = _wrmdir(buf);
-
-	if (error == -1) {
-		switch (GetLastError()) {
-			/* _wrmdir() is documented to return EACCES if "A program has an open
-			 * handle to the directory."  This sounds like what everybody else calls
-			 * EBUSY.  Let's convert appropriate error codes.
-			 */
-			case ERROR_SHARING_VIOLATION:
-				errno = EBUSY;
-				break;
-
-			/* This error can be returned when trying to rmdir an extant file. */
-			case ERROR_DIRECTORY:
-				errno = ENOTDIR;
-				break;
-		}
-	}
-
-	return error;
+int p_hide_directory__w32(const char *path)
+{
+	wchar_t buf[GIT_WIN_PATH];
+	git__utf8_to_16(buf, GIT_WIN_PATH, path);
+	return (SetFileAttributesW(buf, FILE_ATTRIBUTE_HIDDEN) != 0) ? 0 : -1;
 }
 
 char *p_realpath(const char *orig_path, char *buffer)
 {
-	git_win32_path orig_path_w, buffer_w;
+	int ret;
+	wchar_t orig_path_w[GIT_WIN_PATH];
+	wchar_t buffer_w[GIT_WIN_PATH];
 
-	if (git_win32_path_from_utf8(orig_path_w, orig_path) < 0)
-		return NULL;
+	git__utf8_to_16(orig_path_w, GIT_WIN_PATH, orig_path);
 
-	/* Note that if the path provided is a relative path, then the current directory
-	 * is used to resolve the path -- which is a concurrency issue because the current
-	 * directory is a process-wide variable. */
-	if (!GetFullPathNameW(orig_path_w, GIT_WIN_PATH_UTF16, buffer_w, NULL)) {
-		if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
-			errno = ENAMETOOLONG;
-		else
-			errno = EINVAL;
+	/* Implicitly use GetCurrentDirectory which can be a threading issue */
+	ret = GetFullPathNameW(orig_path_w, GIT_WIN_PATH, buffer_w, NULL);
 
-		return NULL;
-	}
+	/* According to MSDN, a return value equals to zero means a failure. */
+	if (ret == 0 || ret > GIT_WIN_PATH)
+		buffer = NULL;
 
-	/* The path must exist. */
-	if (GetFileAttributesW(buffer_w) == INVALID_FILE_ATTRIBUTES) {
+	else if (GetFileAttributesW(buffer_w) == INVALID_FILE_ATTRIBUTES) {
+		buffer = NULL;
 		errno = ENOENT;
-		return NULL;
 	}
 
-	if (!buffer && !(buffer = git__malloc(GIT_WIN_PATH_UTF8))) {
-		errno = ENOMEM;
-		return NULL;
+	else if (buffer == NULL) {
+		int buffer_sz = WideCharToMultiByte(
+			CP_UTF8, 0, buffer_w, -1, NULL, 0, NULL, NULL);
+
+		if (!buffer_sz ||
+			!(buffer = (char *)git__malloc(buffer_sz)) ||
+			!WideCharToMultiByte(
+				CP_UTF8, 0, buffer_w, -1, buffer, buffer_sz, NULL, NULL))
+		{
+			git__free(buffer);
+			buffer = NULL;
+		}
 	}
 
-	/* Convert the path to UTF-8. If the caller provided a buffer, then it
-	 * is assumed to be GIT_WIN_PATH_UTF8 characters in size. If it isn't,
-	 * then we may overflow. */
-	if (git_win32_path_to_utf8(buffer, buffer_w) < 0)
-		return NULL;
+	else if (!WideCharToMultiByte(
+		CP_UTF8, 0, buffer_w, -1, buffer, GIT_PATH_MAX, NULL, NULL))
+		buffer = NULL;
 
-	git_path_mkposix(buffer);
+	if (buffer)
+		git_path_mkposix(buffer);
 
 	return buffer;
 }
 
 int p_vsnprintf(char *buffer, size_t count, const char *format, va_list argptr)
 {
-#if defined(_MSC_VER)
+#ifdef _MSC_VER
 	int len;
 
-	if (count == 0)
-		return _vscprintf(format, argptr);
-
-	#if _MSC_VER >= 1500
-	len = _vsnprintf_s(buffer, count, _TRUNCATE, format, argptr);
-	#else
-	len = _vsnprintf(buffer, count, format, argptr);
-	#endif
-
-	if (len < 0)
+	if (count == 0 ||
+		(len = _vsnprintf_s(buffer, count, _TRUNCATE, format, argptr)) < 0)
 		return _vscprintf(format, argptr);
 
 	return len;
@@ -534,10 +397,11 @@ int p_snprintf(char *buffer, size_t count, const char *format, ...)
 	return r;
 }
 
-/* TODO: wut? */
+extern int p_creat(const char *path, mode_t mode);
+
 int p_mkstemp(char *tmp_path)
 {
-#if defined(_MSC_VER) && _MSC_VER >= 1500
+#if defined(_MSC_VER)
 	if (_mktemp_s(tmp_path, strlen(tmp_path) + 1) != 0)
 		return -1;
 #else
@@ -545,75 +409,32 @@ int p_mkstemp(char *tmp_path)
 		return -1;
 #endif
 
-	return p_open(tmp_path, O_RDWR | O_CREAT | O_EXCL, 0744); //-V536
+	return p_creat(tmp_path, 0744); //-V536
+}
+
+int p_setenv(const char* name, const char* value, int overwrite)
+{
+	if (overwrite != 1)
+		return -1;
+
+	return (SetEnvironmentVariableA(name, value) == 0 ? -1 : 0);
 }
 
 int p_access(const char* path, mode_t mode)
 {
-	git_win32_path buf;
-
-	if (git_win32_path_from_utf8(buf, path) < 0)
-		return -1;
-
-	return _waccess(buf, mode & WIN32_MODE_MASK);
-}
-
-static int ensure_writable(wchar_t *fpath)
-{
-	DWORD attrs;
-
-	attrs = GetFileAttributesW(fpath);
-	if (attrs == INVALID_FILE_ATTRIBUTES) {
-		if (GetLastError() == ERROR_FILE_NOT_FOUND)
-			return 0;
-
-		giterr_set(GITERR_OS, "failed to get attributes");
-		return -1;
-	}
-
-	if (!(attrs & FILE_ATTRIBUTE_READONLY))
-		return 0;
-
-	attrs &= ~FILE_ATTRIBUTE_READONLY;
-	if (!SetFileAttributesW(fpath, attrs)) {
-		giterr_set(GITERR_OS, "failed to set attributes");
-		return -1;
-	}
-
-	return 0;
+	wchar_t buf[GIT_WIN_PATH];
+	git__utf8_to_16(buf, GIT_WIN_PATH, path);
+	return _waccess(buf, mode);
 }
 
 int p_rename(const char *from, const char *to)
 {
-	git_win32_path wfrom;
-	git_win32_path wto;
-	int rename_tries;
-	int rename_succeeded;
-	int error;
+	wchar_t wfrom[GIT_WIN_PATH];
+	wchar_t wto[GIT_WIN_PATH];
 
-	if (git_win32_path_from_utf8(wfrom, from) < 0 ||
-		git_win32_path_from_utf8(wto, to) < 0)
-		return -1;
-
-	/* wait up to 50ms if file is locked by another thread or process */
-	rename_tries = 0;
-	rename_succeeded = 0;
-	while (rename_tries < 10) {
-		if (ensure_writable(wto) == 0 &&
-		    MoveFileExW(wfrom, wto, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != 0) {
-			rename_succeeded = 1;
-			break;
-		}
-		
-		error = GetLastError();
-		if (error == ERROR_SHARING_VIOLATION || error == ERROR_ACCESS_DENIED) {
-			Sleep(5);
-			rename_tries++;
-		} else
-			break;
-	}
-	
-	return rename_succeeded ? 0 : -1;
+	git__utf8_to_16(wfrom, GIT_WIN_PATH, from);
+	git__utf8_to_16(wto, GIT_WIN_PATH, to);
+	return MoveFileExW(wfrom, wto, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) ? 0 : -1;
 }
 
 int p_recv(GIT_SOCKET socket, void *buffer, size_t length, int flags)
@@ -636,65 +457,119 @@ int p_send(GIT_SOCKET socket, const void *buffer, size_t length, int flags)
  * Borrowed from http://old.nabble.com/Porting-localtime_r-and-gmtime_r-td15282276.html
  * On Win32, `gmtime_r` doesn't exist but `gmtime` is threadsafe, so we can use that
  */
-struct tm *
-p_localtime_r (const time_t *timer, struct tm *result)
-{
-	struct tm *local_result;
-	local_result = localtime (timer);
+struct tm * 
+p_localtime_r (const time_t *timer, struct tm *result) 
+{ 
+   struct tm *local_result; 
+   local_result = localtime (timer); 
 
-	if (local_result == NULL || result == NULL)
-		return NULL;
+   if (local_result == NULL || result == NULL) 
+      return NULL; 
 
-	memcpy (result, local_result, sizeof (struct tm));
-	return result;
+   memcpy (result, local_result, sizeof (struct tm)); 
+   return result; 
+} 
+struct tm * 
+p_gmtime_r (const time_t *timer, struct tm *result) 
+{ 
+   struct tm *local_result; 
+   local_result = gmtime (timer); 
+
+   if (local_result == NULL || result == NULL) 
+      return NULL; 
+
+   memcpy (result, local_result, sizeof (struct tm)); 
+   return result; 
 }
-struct tm *
-p_gmtime_r (const time_t *timer, struct tm *result)
+
+#if defined(_MSC_VER) || defined(_MSC_EXTENSIONS)
+#define DELTA_EPOCH_IN_MICROSECS  11644473600000000Ui64
+#else
+#define DELTA_EPOCH_IN_MICROSECS  11644473600000000ULL
+#endif
+ 
+#ifndef _TIMEZONE_DEFINED
+#define _TIMEZONE_DEFINED
+struct timezone 
 {
-	struct tm *local_result;
-	local_result = gmtime (timer);
-
-	if (local_result == NULL || result == NULL)
-		return NULL;
-
-	memcpy (result, local_result, sizeof (struct tm));
-	return result;
+   int  tz_minuteswest; /* minutes W of Greenwich */
+   int  tz_dsttime;     /* type of dst correction */
+};
+#endif
+ 
+int p_gettimeofday(struct timeval *tv, struct timezone *tz)
+{
+   FILETIME ft;
+   unsigned __int64 tmpres = 0;
+   static int tzflag;
+ 
+   if (NULL != tv)
+      {
+         GetSystemTimeAsFileTime(&ft);
+ 
+         tmpres |= ft.dwHighDateTime;
+         tmpres <<= 32;
+         tmpres |= ft.dwLowDateTime;
+ 
+         /*converting file time to unix epoch*/
+         tmpres /= 10;  /*convert into microseconds*/
+         tmpres -= DELTA_EPOCH_IN_MICROSECS; 
+         tv->tv_sec = (long)(tmpres / 1000000UL);
+         tv->tv_usec = (long)(tmpres % 1000000UL);
+      }
+ 
+   if (NULL != tz)
+      {
+         if (!tzflag)
+            {
+               _tzset();
+               tzflag++;
+            }
+         tz->tz_minuteswest = _timezone / 60;
+         tz->tz_dsttime = _daylight;
+      }
+ 
+   return 0;
 }
 
-int p_inet_pton(int af, const char *src, void *dst)
+int p_inet_pton(int af, const char* src, void* dst)
 {
-	struct sockaddr_storage sin;
-	void *addr;
-	int sin_len = sizeof(struct sockaddr_storage), addr_len;
-	int error = 0;
+	union {
+		struct sockaddr_in6 sin6;
+		struct sockaddr_in sin;
+	} sa;
+	int srcsize;
 
-	if (af == AF_INET) {
-		addr = &((struct sockaddr_in *)&sin)->sin_addr;
-		addr_len = sizeof(struct in_addr);
-	} else if (af == AF_INET6) {
-		addr = &((struct sockaddr_in6 *)&sin)->sin6_addr;
-		addr_len = sizeof(struct in6_addr);
-	} else {
-		errno = EAFNOSUPPORT;
+	switch(af)
+	{
+		case AF_INET:
+			sa.sin.sin_family = AF_INET;
+			srcsize = (int)sizeof(sa.sin);
+		break;
+		case AF_INET6:
+			sa.sin6.sin6_family = AF_INET6;
+			srcsize = (int)sizeof(sa.sin6);
+		break;
+		default:
+			errno = WSAEPFNOSUPPORT;
+			return -1;
+	}
+
+	if (WSAStringToAddress((LPSTR)src, af, NULL, (struct sockaddr *) &sa, &srcsize) != 0)
+	{
+		errno = WSAGetLastError();
 		return -1;
 	}
 
-	if ((error = WSAStringToAddressA((LPSTR)src, af, NULL, (LPSOCKADDR)&sin, &sin_len)) == 0) {
-		memcpy(dst, addr, addr_len);
-		return 1;
+	switch(af)
+	{
+		case AF_INET:
+			memcpy(dst, &sa.sin.sin_addr, sizeof(sa.sin.sin_addr));
+		break;
+		case AF_INET6:
+			memcpy(dst, &sa.sin6.sin6_addr, sizeof(sa.sin6.sin6_addr));
+		break;
 	}
 
-	switch(WSAGetLastError()) {
-	case WSAEINVAL:
-		return 0;
-	case WSAEFAULT:
-		errno = ENOSPC;
-		return -1;
-	case WSA_NOT_ENOUGH_MEMORY:
-		errno = ENOMEM;
-		return -1;
-	}
-
-	errno = EINVAL;
-	return -1;
+	return 1;
 }

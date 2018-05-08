@@ -9,20 +9,15 @@
 
 #if defined(__MINGW32__)
 
-#undef stat
+/* use a 64-bit file offset type */
+# define lseek _lseeki64
+# define stat _stati64
+# define fstat _fstati64
 
-#if _WIN32_WINNT >= 0x0601
-#define stat __stat64
-#else
-#define stat _stati64
-#endif
-
-#if _WIN32_WINNT < 0x0600 && !defined(__MINGW64_VERSION_MAJOR)
-#undef MemoryBarrier
-void __mingworg_MemoryBarrier(void);
-#define MemoryBarrier __mingworg_MemoryBarrier
-#define VOLUME_NAME_DOS 0x0
-#endif
+/* stat: file mode type testing macros */
+# define _S_IFLNK 0120000
+# define S_IFLNK _S_IFLNK
+# define S_ISLNK(m) (((m) & _S_IFMT) == _S_IFLNK)
 
 #endif
 

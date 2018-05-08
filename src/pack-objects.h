@@ -14,11 +14,8 @@
 #include "hash.h"
 #include "oidmap.h"
 #include "netops.h"
-#include "zstream.h"
-#include "pool.h"
 
 #include "git2/oid.h"
-#include "git2/pack.h"
 
 #define GIT_PACK_WINDOW 10 /* number of objects to possibly delta against */
 #define GIT_PACK_DEPTH 50 /* max delta depth */
@@ -51,21 +48,13 @@ typedef struct git_pobject {
 	    filled:1;
 } git_pobject;
 
-typedef struct {
-	git_oid id;
-	unsigned int uninteresting:1,
-		seen:1;
-} git_walk_object;
-
 struct git_packbuilder {
 	git_repository *repo; /* associated repository */
 	git_odb *odb; /* associated object database */
 
 	git_hash_ctx ctx;
-	git_zstream zstream;
 
 	uint32_t nr_objects,
-		 nr_deltified,
 		 nr_alloc,
 		 nr_written,
 		 nr_remaining;
@@ -73,9 +62,6 @@ struct git_packbuilder {
 	git_pobject *object_list;
 
 	git_oidmap *object_ix;
-
-	git_oidmap *walk_objects;
-	git_pool object_pool;
 
 	git_oid pack_oid; /* hash of written pack */
 
@@ -92,10 +78,6 @@ struct git_packbuilder {
 	uint64_t window_memory_limit;
 
 	int nr_threads; /* nr of threads to use */
-
-	git_packbuilder_progress progress_cb;
-	void *progress_cb_payload;
-	double last_progress_report_time; /* the time progress was last reported */
 
 	bool done;
 };

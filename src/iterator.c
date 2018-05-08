@@ -7,10 +7,9 @@
 
 #include "iterator.h"
 #include "tree.h"
-#include "index.h"
 #include "ignore.h"
 #include "buffer.h"
-#include "submodule.h"
+#include "git2/submodule.h"
 #include <ctype.h>
 
 #define ITERATOR_SET_CB(P,NAME_LC) do { \
@@ -46,10 +45,6 @@
 #define iterator__include_trees(I)   iterator__flag(I,INCLUDE_TREES)
 #define iterator__dont_autoexpand(I) iterator__flag(I,DONT_AUTOEXPAND)
 #define iterator__do_autoexpand(I)   !iterator__flag(I,DONT_AUTOEXPAND)
-#define iterator__include_conflicts(I) iterator__flag(I, INCLUDE_CONFLICTS)
-
-#define GIT_ITERATOR_FIRST_ACCESS (1 << 15)
-#define iterator__has_been_accessed(I) iterator__flag(I,FIRST_ACCESS)
 
 #define iterator__end(I) ((git_iterator *)(I))->end
 #define iterator__past_end(I,PATH) \
@@ -72,8 +67,6 @@ static int iterator__reset_range(
 		iter->end = git__strdup(end);
 		GITERR_CHECK_ALLOC(iter->end);
 	}
-
-	iter->flags &= ~GIT_ITERATOR_FIRST_ACCESS;
 
 	return 0;
 }
@@ -116,7 +109,7 @@ static int empty_iterator__noop(const git_index_entry **e, git_iterator *i)
 {
 	GIT_UNUSED(i);
 	iterator__clear_entry(e);
-	return GIT_ITEROVER;
+	return 0;
 }
 
 static int empty_iterator__seek(git_iterator *i, const char *p)
@@ -200,7 +193,6 @@ typedef struct {
 	git_buf path;
 	int path_ambiguities;
 	bool path_has_filename;
-	bool entry_is_current;
 	int (*strncomp)(const char *a, const char *b, size_t sz);
 } tree_iterator;
 
@@ -274,28 +266,9 @@ static int tree_iterator__search_cmp(const void *key, const void *val, void *p)
 		((tree_iterator *)p)->strncomp);
 }
 
-static bool tree_iterator__move_to_next(
-	tree_iterator *ti, tree_iterator_frame *tf)
-{
-	if (tf->next > tf->current + 1)
-		ti->path_ambiguities--;
-
-	if (!tf->up) { /* at root */
-		tf->current = tf->next;
-		return false;
-	}
-
-	for (; tf->current < tf->next; tf->current++) {
-		git_tree_free(tf->entries[tf->current]->tree);
-		tf->entries[tf->current]->tree = NULL;
-	}
-
-	return (tf->current < tf->n_entries);
-}
-
 static int tree_iterator__set_next(tree_iterator *ti, tree_iterator_frame *tf)
 {
-	int error = 0;
+	int error;
 	const git_tree_entry *te, *last = NULL;
 
 	tf->next = tf->current;
@@ -306,23 +279,18 @@ static int tree_iterator__set_next(tree_iterator *ti, tree_iterator_frame *tf)
 		if (last && tree_iterator__te_cmp(last, te, ti->strncomp))
 			break;
 
-		/* try to load trees for items in [current,next) range */
-		if (!error && git_tree_entry__is_tree(te))
-			error = git_tree_lookup(
-				&tf->entries[tf->next]->tree, ti->base.repo, &te->oid);
+		/* load trees for items in [current,next) range */
+		if (git_tree_entry__is_tree(te) &&
+			(error = git_tree_lookup(
+				&tf->entries[tf->next]->tree, ti->base.repo, &te->oid)) < 0)
+			return error;
 	}
 
 	if (tf->next > tf->current + 1)
 		ti->path_ambiguities++;
 
-	/* if a tree lookup failed, advance over this span and return failure */
-	if (error < 0) {
-		tree_iterator__move_to_next(ti, tf);
-		return error;
-	}
-
 	if (last && !tree_iterator__current_filename(ti, last))
-		return -1; /* must have been allocation failure */
+		return -1;
 
 	return 0;
 }
@@ -337,18 +305,16 @@ static int tree_iterator__push_frame(tree_iterator *ti)
 {
 	int error = 0;
 	tree_iterator_frame *head = ti->head, *tf = NULL;
-	size_t i, n_entries = 0, alloclen;
+	size_t i, n_entries = 0;
 
 	if (head->current >= head->n_entries || !head->entries[head->current]->tree)
-		return GIT_ITEROVER;
+		return 0;
 
 	for (i = head->current; i < head->next; ++i)
 		n_entries += git_tree_entrycount(head->entries[i]->tree);
 
-	GITERR_CHECK_ALLOC_MULTIPLY(&alloclen, sizeof(tree_iterator_entry *), n_entries);
-	GITERR_CHECK_ALLOC_ADD(&alloclen, alloclen, sizeof(tree_iterator_frame));
-
-	tf = git__calloc(1, alloclen);
+	tf = git__calloc(sizeof(tree_iterator_frame) +
+		n_entries * sizeof(tree_iterator_entry *), 1);
 	GITERR_CHECK_ALLOC(tf);
 
 	tf->n_entries = n_entries;
@@ -393,7 +359,7 @@ static int tree_iterator__push_frame(tree_iterator *ti)
 		}
 	}
 
-	ti->path_has_filename = ti->entry_is_current = false;
+	ti->path_has_filename = false;
 
 	if ((error = tree_iterator__set_next(ti, tf)) < 0)
 		return error;
@@ -403,6 +369,25 @@ static int tree_iterator__push_frame(tree_iterator *ti)
 		return tree_iterator__push_frame(ti);
 
 	return 0;
+}
+
+static bool tree_iterator__move_to_next(
+	tree_iterator *ti, tree_iterator_frame *tf)
+{
+	if (tf->next > tf->current + 1)
+		ti->path_ambiguities--;
+
+	if (!tf->up) { /* at root */
+		tf->current = tf->next;
+		return false;
+	}
+
+	for (; tf->current < tf->next; tf->current++) {
+		git_tree_free(tf->entries[tf->current]->tree);
+		tf->entries[tf->current]->tree = NULL;
+	}
+
+	return (tf->current < tf->n_entries);
 }
 
 static bool tree_iterator__pop_frame(tree_iterator *ti, bool final)
@@ -427,7 +412,7 @@ static bool tree_iterator__pop_frame(tree_iterator *ti, bool final)
 	return true;
 }
 
-static void tree_iterator__pop_all(tree_iterator *ti, bool to_end, bool final)
+static int tree_iterator__pop_all(tree_iterator *ti, bool to_end, bool final)
 {
 	while (tree_iterator__pop_frame(ti, final)) /* pop to root */;
 
@@ -436,34 +421,6 @@ static void tree_iterator__pop_all(tree_iterator *ti, bool to_end, bool final)
 		ti->path_ambiguities = 0;
 		git_buf_clear(&ti->path);
 	}
-}
-
-static int tree_iterator__update_entry(tree_iterator *ti)
-{
-	tree_iterator_frame *tf;
-    const git_tree_entry *te;
-
-	if (ti->entry_is_current)
-        return 0;
-
-	tf = ti->head;
-    te = tf->entries[tf->current]->te;
-
-	ti->entry.mode = te->attr;
-	git_oid_cpy(&ti->entry.id, &te->oid);
-
-	ti->entry.path = tree_iterator__current_filename(ti, te);
-	GITERR_CHECK_ALLOC(ti->entry.path);
-
-	if (ti->path_ambiguities > 0)
-		tree_iterator__rewrite_filename(ti);
-
-	if (iterator__past_end(ti, ti->entry.path)) {
-		tree_iterator__pop_all(ti, true, false);
-		return GIT_ITEROVER;
-	}
-
-	ti->entry_is_current = true;
 
 	return 0;
 }
@@ -471,22 +428,30 @@ static int tree_iterator__update_entry(tree_iterator *ti)
 static int tree_iterator__current(
 	const git_index_entry **entry, git_iterator *self)
 {
-	int error;
 	tree_iterator *ti = (tree_iterator *)self;
 	tree_iterator_frame *tf = ti->head;
+	const git_tree_entry *te;
 
 	iterator__clear_entry(entry);
 
 	if (tf->current >= tf->n_entries)
-		return GIT_ITEROVER;
+		return 0;
+	te = tf->entries[tf->current]->te;
 
-	if ((error = tree_iterator__update_entry(ti)) < 0)
-		return error;
+	ti->entry.mode = te->attr;
+	git_oid_cpy(&ti->entry.oid, &te->oid);
+
+	ti->entry.path = tree_iterator__current_filename(ti, te);
+	GITERR_CHECK_ALLOC(ti->entry.path);
+
+	if (ti->path_ambiguities > 0)
+		tree_iterator__rewrite_filename(ti);
+
+	if (iterator__past_end(ti, ti->entry.path))
+		return tree_iterator__pop_all(ti, true, false);
 
 	if (entry)
 		*entry = &ti->entry;
-
-	ti->base.flags |= GIT_ITERATOR_FIRST_ACCESS;
 
 	return 0;
 }
@@ -499,10 +464,8 @@ static int tree_iterator__advance_into(
 
 	iterator__clear_entry(entry);
 
-	if (tree_iterator__at_tree(ti))
-		error = tree_iterator__push_frame(ti);
-
-	if (!error && entry)
+	if (tree_iterator__at_tree(ti) &&
+		!(error = tree_iterator__push_frame(ti)))
 		error = tree_iterator__current(entry, self);
 
 	return error;
@@ -517,11 +480,8 @@ static int tree_iterator__advance(
 
 	iterator__clear_entry(entry);
 
-	if (tf->current >= tf->n_entries)
-		return GIT_ITEROVER;
-
-	if (!iterator__has_been_accessed(ti))
-		return tree_iterator__current(entry, self);
+	if (tf->current > tf->n_entries)
+		return 0;
 
 	if (iterator__do_autoexpand(ti) && iterator__include_trees(ti) &&
 		tree_iterator__at_tree(ti))
@@ -529,7 +489,7 @@ static int tree_iterator__advance(
 
 	if (ti->path_has_filename) {
 		git_buf_rtruncate_at_char(&ti->path, '/');
-		ti->path_has_filename = ti->entry_is_current = false;
+		ti->path_has_filename = false;
 	}
 
 	/* scan forward and up, advancing in frame or popping frame when done */
@@ -647,8 +607,6 @@ typedef struct {
 	git_iterator base;
 	git_iterator_callbacks cb;
 	git_index *index;
-	git_vector entries;
-	git_vector_cmp entry_srch;
 	size_t current;
 	/* when not in autoexpand mode, use these to represent "tree" state */
 	git_buf partial;
@@ -659,26 +617,23 @@ typedef struct {
 
 static const git_index_entry *index_iterator__index_entry(index_iterator *ii)
 {
-	const git_index_entry *ie = git_vector_get(&ii->entries, ii->current);
+	const git_index_entry *ie = git_index_get_byindex(ii->index, ii->current);
 
 	if (ie != NULL && iterator__past_end(ii, ie->path)) {
-		ii->current = git_vector_length(&ii->entries);
+		ii->current = git_index_entrycount(ii->index);
 		ie = NULL;
 	}
 
 	return ie;
 }
 
-static const git_index_entry *index_iterator__advance_over_conflicts(index_iterator *ii)
+static const git_index_entry *index_iterator__skip_conflicts(index_iterator *ii)
 {
-	const git_index_entry *ie = index_iterator__index_entry(ii);
+	const git_index_entry *ie;
 
-	if (!iterator__include_conflicts(ii)) {
-		while (ie && git_index_entry_is_conflict(ie)) {
-			ii->current++;
-			ie = index_iterator__index_entry(ii);
-		}
-	}
+	while ((ie = index_iterator__index_entry(ii)) != NULL &&
+		   git_index_entry_stage(ie) != 0)
+		ii->current++;
 
 	return ie;
 }
@@ -706,7 +661,7 @@ static void index_iterator__next_prefix_tree(index_iterator *ii)
 
 static int index_iterator__first_prefix_tree(index_iterator *ii)
 {
-	const git_index_entry *ie = index_iterator__advance_over_conflicts(ii);
+	const git_index_entry *ie = index_iterator__skip_conflicts(ii);
 	const char *scan, *prior, *slash;
 
 	if (!ie || !iterator__include_trees(ii))
@@ -734,7 +689,7 @@ static int index_iterator__current(
 	const git_index_entry **entry, git_iterator *self)
 {
 	index_iterator *ii = (index_iterator *)self;
-	const git_index_entry *ie = git_vector_get(&ii->entries, ii->current);
+	const git_index_entry *ie = git_index_get_byindex(ii->index, ii->current);
 
 	if (ie != NULL && index_iterator__at_tree(ii)) {
 		ii->tree_entry.path = ii->partial.ptr;
@@ -744,26 +699,21 @@ static int index_iterator__current(
 	if (entry)
 		*entry = ie;
 
-	ii->base.flags |= GIT_ITERATOR_FIRST_ACCESS;
-
-	return (ie != NULL) ? 0 : GIT_ITEROVER;
+	return 0;
 }
 
 static int index_iterator__at_end(git_iterator *self)
 {
 	index_iterator *ii = (index_iterator *)self;
-	return (ii->current >= git_vector_length(&ii->entries));
+	return (ii->current >= git_index_entrycount(ii->index));
 }
 
 static int index_iterator__advance(
 	const git_index_entry **entry, git_iterator *self)
 {
 	index_iterator *ii = (index_iterator *)self;
-	size_t entrycount = git_vector_length(&ii->entries);
+	size_t entrycount = git_index_entrycount(ii->index);
 	const git_index_entry *ie;
-
-	if (!iterator__has_been_accessed(ii))
-		return index_iterator__current(entry, self);
 
 	if (index_iterator__at_tree(ii)) {
 		if (iterator__do_autoexpand(ii)) {
@@ -774,7 +724,7 @@ static int index_iterator__advance(
 			while (ii->current < entrycount) {
 				ii->current++;
 
-				if (!(ie = git_vector_get(&ii->entries, ii->current)) ||
+				if (!(ie = git_index_get_byindex(ii->index, ii->current)) ||
 					ii->base.prefixcomp(ie->path, ii->partial.ptr) != 0)
 					break;
 			}
@@ -797,7 +747,7 @@ static int index_iterator__advance_into(
 	const git_index_entry **entry, git_iterator *self)
 {
 	index_iterator *ii = (index_iterator *)self;
-	const git_index_entry *ie = git_vector_get(&ii->entries, ii->current);
+	const git_index_entry *ie = git_index_get_byindex(ii->index, ii->current);
 
 	if (ie != NULL && index_iterator__at_tree(ii)) {
 		if (ii->restore_terminator)
@@ -823,13 +773,10 @@ static int index_iterator__reset(
 	if (iterator__reset_range(self, start, end) < 0)
 		return -1;
 
-	ii->current = 0;
+	ii->current = ii->base.start ?
+		git_index__prefix_position(ii->index, ii->base.start) : 0;
 
-	if (ii->base.start)
-		git_index_snapshot_find(
-			&ii->current, &ii->entries, ii->entry_srch, ii->base.start, 0, 0);
-
-	if ((ie = index_iterator__advance_over_conflicts(ii)) == NULL)
+	if ((ie = index_iterator__skip_conflicts(ii)) == NULL)
 		return 0;
 
 	if (git_buf_sets(&ii->partial, ie->path) < 0)
@@ -852,8 +799,9 @@ static int index_iterator__reset(
 static void index_iterator__free(git_iterator *self)
 {
 	index_iterator *ii = (index_iterator *)self;
-	git_index_snapshot_release(&ii->entries, ii->index);
+	git_index_free(ii->index);
 	ii->index = NULL;
+
 	git_buf_free(&ii->partial);
 }
 
@@ -864,29 +812,18 @@ int git_iterator_for_index(
 	const char *start,
 	const char *end)
 {
-	int error = 0;
 	index_iterator *ii = git__calloc(1, sizeof(index_iterator));
 	GITERR_CHECK_ALLOC(ii);
 
-	if ((error = git_index_snapshot_new(&ii->entries, index)) < 0) {
-		git__free(ii);
-		return error;
-	}
-	ii->index = index;
-
 	ITERATOR_BASE_INIT(ii, index, INDEX, git_index_owner(index));
 
-	if ((error = iterator__update_ignore_case((git_iterator *)ii, flags)) < 0) {
-		git_iterator_free((git_iterator *)ii);
-		return error;
+	if (index->ignore_case) {
+		ii->base.flags |= GIT_ITERATOR_IGNORE_CASE;
+		ii->base.prefixcomp = git__prefixcmp_icase;
 	}
 
-	ii->entry_srch = iterator__ignore_case(ii) ?
-		git_index_entry_isrch : git_index_entry_srch;
-
-	git_vector_set_cmp(&ii->entries, iterator__ignore_case(ii) ?
-		git_index_entry_icmp : git_index_entry_cmp);
-	git_vector_sort(&ii->entries);
+	ii->index = index;
+	GIT_REFCOUNT_INC(index);
 
 	git_buf_init(&ii->partial, 0);
 	ii->tree_entry.mode = GIT_FILEMODE_TREE;
@@ -894,6 +831,7 @@ int git_iterator_for_index(
 	index_iterator__reset((git_iterator *)ii, NULL, NULL);
 
 	*iter = (git_iterator *)ii;
+
 	return 0;
 }
 
@@ -903,7 +841,6 @@ struct fs_iterator_frame {
 	fs_iterator_frame *next;
 	git_vector entries;
 	size_t index;
-	int is_ignored;
 };
 
 typedef struct fs_iterator fs_iterator;
@@ -914,7 +851,6 @@ struct fs_iterator {
 	git_index_entry entry;
 	git_buf path;
 	size_t root_len;
-	uint32_t dirload_flags;
 	int depth;
 
 	int (*enter_dir_cb)(fs_iterator *self);
@@ -924,31 +860,12 @@ struct fs_iterator {
 
 #define FS_MAX_DEPTH 100
 
-typedef struct {
-	struct stat st;
-	size_t      path_len;
-	char        path[GIT_FLEX_ARRAY];
-} fs_iterator_path_with_stat;
-
-static int fs_iterator_path_with_stat_cmp(const void *a, const void *b)
-{
-	const fs_iterator_path_with_stat *psa = a, *psb = b;
-	return strcmp(psa->path, psb->path);
-}
-
-static int fs_iterator_path_with_stat_cmp_icase(const void *a, const void *b)
-{
-	const fs_iterator_path_with_stat *psa = a, *psb = b;
-	return strcasecmp(psa->path, psb->path);
-}
-
 static fs_iterator_frame *fs_iterator__alloc_frame(fs_iterator *fi)
 {
 	fs_iterator_frame *ff = git__calloc(1, sizeof(fs_iterator_frame));
 	git_vector_cmp entry_compare = CASESELECT(
 		iterator__ignore_case(fi),
-		fs_iterator_path_with_stat_cmp_icase,
-		fs_iterator_path_with_stat_cmp);
+		git_path_with_stat_cmp_icase, git_path_with_stat_cmp);
 
 	if (ff && git_vector_init(&ff->entries, 0, entry_compare) < 0) {
 		git__free(ff);
@@ -960,7 +877,12 @@ static fs_iterator_frame *fs_iterator__alloc_frame(fs_iterator *fi)
 
 static void fs_iterator__free_frame(fs_iterator_frame *ff)
 {
-	git_vector_free_deep(&ff->entries);
+	size_t i;
+	git_path_with_stat *path;
+
+	git_vector_foreach(&ff->entries, i, path)
+		git__free(path);
+	git_vector_free(&ff->entries);
 	git__free(ff);
 }
 
@@ -984,13 +906,11 @@ static void fs_iterator__pop_frame(
 }
 
 static int fs_iterator__update_entry(fs_iterator *fi);
-static int fs_iterator__advance_over(
-	const git_index_entry **entry, git_iterator *self);
 
 static int fs_iterator__entry_cmp(const void *i, const void *item)
 {
 	const fs_iterator *fi = (const fs_iterator *)i;
-	const fs_iterator_path_with_stat *ps = item;
+	const git_path_with_stat *ps = item;
 	return fi->base.prefixcomp(fi->base.start, ps->path);
 }
 
@@ -1007,99 +927,6 @@ static void fs_iterator__seek_frame_start(
 		ff->index = 0;
 }
 
-static int dirload_with_stat(
-	const char *dirpath,
-	size_t prefix_len,
-	unsigned int flags,
-	const char *start_stat,
-	const char *end_stat,
-	git_vector *contents)
-{
-	git_path_diriter diriter = GIT_PATH_DIRITER_INIT;
-	const char *path;
-	int (*strncomp)(const char *a, const char *b, size_t sz);
-	size_t start_len = start_stat ? strlen(start_stat) : 0;
-	size_t end_len = end_stat ? strlen(end_stat) : 0;
-	fs_iterator_path_with_stat *ps;
-	size_t path_len, cmp_len, ps_size;
-	int error;
-
-	strncomp = (flags & GIT_PATH_DIR_IGNORE_CASE) != 0 ?
-		git__strncasecmp : git__strncmp;
-
-	/* Any error here is equivalent to the dir not existing, skip over it */
-	if ((error = git_path_diriter_init(&diriter, dirpath, flags)) < 0) {
-		error = GIT_ENOTFOUND;
-		goto done;
-	}
-
-	while ((error = git_path_diriter_next(&diriter)) == 0) {
-		if ((error = git_path_diriter_fullpath(&path, &path_len, &diriter)) < 0)
-			goto done;
-
-		assert(path_len > prefix_len);
-
-		/* remove the prefix if requested */
-		path += prefix_len;
-		path_len -= prefix_len;
-
-		/* skip if before start_stat or after end_stat */
-		cmp_len = min(start_len, path_len);
-		if (cmp_len && strncomp(path, start_stat, cmp_len) < 0)
-			continue;
-		cmp_len = min(end_len, path_len);
-		if (cmp_len && strncomp(path, end_stat, cmp_len) > 0)
-			continue;
-
-		/* Make sure to append two bytes, one for the path's null
-		 * termination, one for a possible trailing '/' for folders.
-		 */
-		GITERR_CHECK_ALLOC_ADD(&ps_size, sizeof(fs_iterator_path_with_stat), path_len);
-		GITERR_CHECK_ALLOC_ADD(&ps_size, ps_size, 2);
-
-		ps = git__calloc(1, ps_size);
-		ps->path_len = path_len;
-
-		memcpy(ps->path, path, path_len);
-
-		if ((error = git_path_diriter_stat(&ps->st, &diriter)) < 0) {
-			if (error == GIT_ENOTFOUND) {
-				/* file was removed between readdir and lstat */
-				git__free(ps);
-				continue;
-			}
-
-			/* Treat the file as unreadable if we get any other error */
-			memset(&ps->st, 0, sizeof(ps->st));
-			ps->st.st_mode = GIT_FILEMODE_UNREADABLE;
-
-			giterr_clear();
-			error = 0;
-		} else if (S_ISDIR(ps->st.st_mode)) {
-			/* Suffix directory paths with a '/' */
-			ps->path[ps->path_len++] = '/';
-			ps->path[ps->path_len] = '\0';
-		} else if(!S_ISREG(ps->st.st_mode) && !S_ISLNK(ps->st.st_mode)) {
-			/* Ignore wacky things in the filesystem */
-			git__free(ps);
-			continue;
-		}
-
-		git_vector_insert(contents, ps);
-	}
-
-	if (error == GIT_ITEROVER)
-		error = 0;
-
-	/* sort now that directory suffix is added */
-	git_vector_sort(contents);
-
-done:
-	git_path_diriter_free(&diriter);
-	return error;
-}
-
-
 static int fs_iterator__expand_dir(fs_iterator *fi)
 {
 	int error;
@@ -1114,28 +941,14 @@ static int fs_iterator__expand_dir(fs_iterator *fi)
 	ff = fs_iterator__alloc_frame(fi);
 	GITERR_CHECK_ALLOC(ff);
 
-	error = dirload_with_stat(
-		fi->path.ptr, fi->root_len, fi->dirload_flags,
+	error = git_path_dirload_with_stat(
+		fi->path.ptr, fi->root_len, iterator__ignore_case(fi),
 		fi->base.start, fi->base.end, &ff->entries);
 
-	if (error < 0) {
-		git_error_state last_error = { 0 };
-		giterr_state_capture(&last_error, error);
-
-		/* these callbacks may clear the error message */
-		fs_iterator__free_frame(ff);
-		fs_iterator__advance_over(NULL, (git_iterator *)fi);
-		/* next time return value we skipped to */
-		fi->base.flags &= ~GIT_ITERATOR_FIRST_ACCESS;
-
-		return giterr_state_restore(&last_error);
-	}
-
-	if (ff->entries.length == 0) {
+	if (error < 0 || ff->entries.length == 0) {
 		fs_iterator__free_frame(ff);
 		return GIT_ENOTFOUND;
 	}
-	fi->base.stat_calls += ff->entries.length;
 
 	fs_iterator__seek_frame_start(fi, ff);
 
@@ -1153,14 +966,9 @@ static int fs_iterator__current(
 	const git_index_entry **entry, git_iterator *self)
 {
 	fs_iterator *fi = (fs_iterator *)self;
-	const git_index_entry *fe = (fi->entry.path == NULL) ? NULL : &fi->entry;
-
 	if (entry)
-		*entry = fe;
-
-	fi->base.flags |= GIT_ITERATOR_FIRST_ACCESS;
-
-	return (fe != NULL) ? 0 : GIT_ITEROVER;
+		*entry = (fi->entry.path == NULL) ? NULL : &fi->entry;
+	return 0;
 }
 
 static int fs_iterator__at_end(git_iterator *self)
@@ -1190,9 +998,6 @@ static int fs_iterator__advance_into(
 	if (!error && entry)
 		error = fs_iterator__current(entry, iter);
 
-	if (!error && !fi->entry.path)
-		error = GIT_ITEROVER;
-
 	return error;
 }
 
@@ -1202,7 +1007,7 @@ static int fs_iterator__advance_over(
 	int error = 0;
 	fs_iterator *fi = (fs_iterator *)self;
 	fs_iterator_frame *ff;
-	fs_iterator_path_with_stat *next;
+	git_path_with_stat *next;
 
 	if (entry != NULL)
 		*entry = NULL;
@@ -1229,9 +1034,6 @@ static int fs_iterator__advance(
 	const git_index_entry **entry, git_iterator *self)
 {
 	fs_iterator *fi = (fs_iterator *)self;
-
-	if (!iterator__has_been_accessed(fi))
-		return fs_iterator__current(entry, self);
 
 	/* given include_trees & autoexpand, we might have to go into a tree */
 	if (iterator__do_autoexpand(fi) &&
@@ -1261,23 +1063,18 @@ static int fs_iterator__seek(git_iterator *self, const char *prefix)
 static int fs_iterator__reset(
 	git_iterator *self, const char *start, const char *end)
 {
-	int error;
 	fs_iterator *fi = (fs_iterator *)self;
 
 	while (fi->stack != NULL && fi->stack->next != NULL)
 		fs_iterator__pop_frame(fi, fi->stack, false);
 	fi->depth = 0;
 
-	if ((error = iterator__reset_range(self, start, end)) < 0)
-		return error;
+	if (iterator__reset_range(self, start, end) < 0)
+		return -1;
 
 	fs_iterator__seek_frame_start(fi, fi->stack);
 
-	error = fs_iterator__update_entry(fi);
-	if (error == GIT_ITEROVER)
-		error = 0;
-
-	return error;
+	return fs_iterator__update_entry(fi);
 }
 
 static void fs_iterator__free(git_iterator *self)
@@ -1292,26 +1089,21 @@ static void fs_iterator__free(git_iterator *self)
 
 static int fs_iterator__update_entry(fs_iterator *fi)
 {
-	fs_iterator_path_with_stat *ps;
-
-	memset(&fi->entry, 0, sizeof(fi->entry));
-
-	if (!fi->stack)
-		return GIT_ITEROVER;
-
-	ps = git_vector_get(&fi->stack->entries, fi->stack->index);
-	if (!ps)
-		return GIT_ITEROVER;
+	git_path_with_stat *ps =
+		git_vector_get(&fi->stack->entries, fi->stack->index);
 
 	git_buf_truncate(&fi->path, fi->root_len);
+	memset(&fi->entry, 0, sizeof(fi->entry));
+
+	if (!ps)
+		return 0;
 	if (git_buf_put(&fi->path, ps->path, ps->path_len) < 0)
 		return -1;
-
 	if (iterator__past_end(fi, fi->path.ptr + fi->root_len))
-		return GIT_ITEROVER;
+		return 0;
 
 	fi->entry.path = ps->path;
-	git_index_entry__init_from_stat(&fi->entry, &ps->st, true);
+	git_index_entry__init_from_stat(&fi->entry, &ps->st);
 
 	/* need different mode here to keep directories during iteration */
 	fi->entry.mode = git_futils_canonical_mode(ps->st.st_mode);
@@ -1322,13 +1114,8 @@ static int fs_iterator__update_entry(fs_iterator *fi)
 		return fs_iterator__advance_over(NULL, (git_iterator *)fi);
 
 	/* if this is a tree and trees aren't included, then skip */
-	if (fi->entry.mode == GIT_FILEMODE_TREE && !iterator__include_trees(fi)) {
-		int error = fs_iterator__advance_into(NULL, (git_iterator *)fi);
-		if (error != GIT_ENOTFOUND)
-			return error;
-		giterr_clear();
-		return fs_iterator__advance_over(NULL, (git_iterator *)fi);
-	}
+	if (fi->entry.mode == GIT_FILEMODE_TREE && !iterator__include_trees(fi))
+		return git_iterator_advance(NULL, (git_iterator *)fi);
 
 	return 0;
 }
@@ -1344,19 +1131,13 @@ static int fs_iterator__initialize(
 	}
 	fi->root_len = fi->path.size;
 
-	fi->dirload_flags =
-		(iterator__ignore_case(fi) ? GIT_PATH_DIR_IGNORE_CASE : 0) |
-		(iterator__flag(fi, PRECOMPOSE_UNICODE) ?
-			GIT_PATH_DIR_PRECOMPOSE_UNICODE : 0);
-
-	if ((error = fs_iterator__expand_dir(fi)) < 0) {
-		if (error == GIT_ENOTFOUND || error == GIT_ITEROVER) {
-			giterr_clear();
-			error = 0;
-		} else {
-			git_iterator_free((git_iterator *)fi);
-			fi = NULL;
-		}
+	if ((error = fs_iterator__expand_dir(fi)) == GIT_ENOTFOUND) {
+		giterr_clear();
+		error = 0;
+	}
+	if (error) {
+		git_iterator_free((git_iterator *)fi);
+		fi = NULL;
 	}
 
 	*out = (git_iterator *)fi;
@@ -1386,16 +1167,6 @@ typedef struct {
 	fs_iterator fi;
 	git_ignores ignores;
 	int is_ignored;
-
-	/*
-	 * We may have a tree or the index+snapshot to compare against
-	 * when checking for submodules.
-	 */
-	git_tree *tree;
-	git_index *index;
-	git_vector index_snapshot;
-	git_vector_cmp entry_srch;
-
 } workdir_iterator;
 
 GIT_INLINE(bool) workdir_path_is_dotgit(const git_buf *path)
@@ -1408,115 +1179,23 @@ GIT_INLINE(bool) workdir_path_is_dotgit(const git_buf *path)
 	if (path->ptr[len - 1] == '/')
 		len--;
 
-	if (git__tolower(path->ptr[len - 1]) != 't' ||
-		git__tolower(path->ptr[len - 2]) != 'i' ||
-		git__tolower(path->ptr[len - 3]) != 'g' ||
-		git__tolower(path->ptr[len - 4]) != '.')
+	if (tolower(path->ptr[len - 1]) != 't' ||
+		tolower(path->ptr[len - 2]) != 'i' ||
+		tolower(path->ptr[len - 3]) != 'g' ||
+		tolower(path->ptr[len - 4]) != '.')
 		return false;
 
 	return (len == 4 || path->ptr[len - 5] == '/');
 }
 
-/**
- * Figure out if an entry is a submodule.
- *
- * We consider it a submodule if the path is listed as a submodule in
- * either the tree or the index.
- */
-static int is_submodule(workdir_iterator *wi, fs_iterator_path_with_stat *ie)
-{
-	int error, is_submodule = 0;
-
-	if (wi->tree) {
-		git_tree_entry *e;
-
-		/* remove the trailing slash for finding */
-		ie->path[ie->path_len-1] = '\0';
-		error = git_tree_entry_bypath(&e, wi->tree, ie->path);
-		ie->path[ie->path_len-1] = '/';
-		if (error < 0 && error != GIT_ENOTFOUND)
-			return 0;
-		if (!error) {
-			is_submodule = e->attr == GIT_FILEMODE_COMMIT;
-			git_tree_entry_free(e);
-		}
-	}
-
-	if (!is_submodule && wi->index) {
-		git_index_entry *e;
-		size_t pos;
-
-		error = git_index_snapshot_find(&pos, &wi->index_snapshot, wi->entry_srch, ie->path, ie->path_len-1, 0);
-		if (error < 0 && error != GIT_ENOTFOUND)
-			return 0;
-
-		if (!error) {
-			e = git_vector_get(&wi->index_snapshot, pos);
-
-			is_submodule = e->mode == GIT_FILEMODE_COMMIT;
-		}
-	}
-
-	return is_submodule;
-}
-
-GIT_INLINE(git_dir_flag) git_entry__dir_flag(git_index_entry *entry) {
-#if defined(GIT_WIN32) && !defined(__MINGW32__)
-	return (entry && entry->mode)
-		? S_ISDIR(entry->mode) ? GIT_DIR_FLAG_TRUE : GIT_DIR_FLAG_FALSE
-		: GIT_DIR_FLAG_UNKNOWN;
-#else
-	GIT_UNUSED(entry);
-	return GIT_DIR_FLAG_UNKNOWN;
-#endif
-}
-
 static int workdir_iterator__enter_dir(fs_iterator *fi)
 {
-	workdir_iterator *wi = (workdir_iterator *)fi;
-	fs_iterator_frame *ff = fi->stack;
-	size_t pos;
-	fs_iterator_path_with_stat *entry;
-	bool found_submodules = false;
-
-	git_dir_flag dir_flag = git_entry__dir_flag(&fi->entry);
-
-	/* check if this directory is ignored */
-	if (git_ignore__lookup(&ff->is_ignored, &wi->ignores, fi->path.ptr + fi->root_len, dir_flag) < 0) {
-		giterr_clear();
-		ff->is_ignored = GIT_IGNORE_NOTFOUND;
-	}
-
-	/* if this is not the top level directory... */
-	if (ff->next != NULL) {
+	/* only push new ignores if this is not top level directory */
+	if (fi->stack->next != NULL) {
+		workdir_iterator *wi = (workdir_iterator *)fi;
 		ssize_t slash_pos = git_buf_rfind_next(&fi->path, '/');
 
-		/* inherit ignored from parent if no rule specified */
-		if (ff->is_ignored <= GIT_IGNORE_NOTFOUND)
-			ff->is_ignored = ff->next->is_ignored;
-
-		/* push new ignores for files in this directory */
 		(void)git_ignore__push_dir(&wi->ignores, &fi->path.ptr[slash_pos + 1]);
-	}
-
-	/* convert submodules to GITLINK and remove trailing slashes */
-	git_vector_foreach(&ff->entries, pos, entry) {
-		if (!S_ISDIR(entry->st.st_mode) || !strcmp(GIT_DIR, entry->path))
-			continue;
-
-		if (is_submodule(wi, entry)) {
-			entry->st.st_mode = GIT_FILEMODE_COMMIT;
-			entry->path_len--;
-			entry->path[entry->path_len] = '\0';
-			found_submodules = true;
-		}
-	}
-
-	/* if we renamed submodules, re-sort and re-seek to start */
-	if (found_submodules) {
-		git_vector_set_sorted(&ff->entries, 0);
-		git_vector_sort(&ff->entries);
-		fs_iterator__seek_frame_start(fi, ff);
 	}
 
 	return 0;
@@ -1531,6 +1210,7 @@ static int workdir_iterator__leave_dir(fs_iterator *fi)
 
 static int workdir_iterator__update_entry(fs_iterator *fi)
 {
+	int error = 0;
 	workdir_iterator *wi = (workdir_iterator *)fi;
 
 	/* skip over .git entries */
@@ -1538,7 +1218,21 @@ static int workdir_iterator__update_entry(fs_iterator *fi)
 		return GIT_ENOTFOUND;
 
 	/* reset is_ignored since we haven't checked yet */
-	wi->is_ignored = GIT_IGNORE_UNCHECKED;
+	wi->is_ignored = -1;
+
+	/* check if apparent tree entries are actually submodules */
+	if (fi->entry.mode != GIT_FILEMODE_TREE)
+		return 0;
+
+	error = git_submodule_lookup(NULL, fi->base.repo, fi->entry.path);
+	if (error < 0)
+		giterr_clear();
+
+	/* mark submodule (or any dir with .git) as GITLINK and remove slash */
+	if (!error || error == GIT_EEXISTS) {
+		fi->entry.mode = S_IFGITLINK;
+		fi->entry.path[strlen(fi->entry.path) - 1] = '\0';
+	}
 
 	return 0;
 }
@@ -1546,31 +1240,22 @@ static int workdir_iterator__update_entry(fs_iterator *fi)
 static void workdir_iterator__free(git_iterator *self)
 {
 	workdir_iterator *wi = (workdir_iterator *)self;
-	if (wi->index)
-		git_index_snapshot_release(&wi->index_snapshot, wi->index);
-	git_tree_free(wi->tree);
 	fs_iterator__free(self);
 	git_ignore__free(&wi->ignores);
 }
 
-int git_iterator_for_workdir_ext(
+int git_iterator_for_workdir(
 	git_iterator **out,
 	git_repository *repo,
-	const char *repo_workdir,
-	git_index *index,
-	git_tree *tree,
 	git_iterator_flag_t flags,
 	const char *start,
 	const char *end)
 {
-	int error, precompose = 0;
+	int error;
 	workdir_iterator *wi;
 
-	if (!repo_workdir) {
-		if (git_repository__ensure_not_bare(repo, "scan working directory") < 0)
-			return GIT_EBAREREPO;
-		repo_workdir = git_repository_workdir(repo);
-	}
+	if (git_repository__ensure_not_bare(repo, "scan working directory") < 0)
+		return GIT_EBAREREPO;
 
 	/* initialize as an fs iterator then do overrides */
 	wi = git__calloc(1, sizeof(workdir_iterator));
@@ -1584,32 +1269,15 @@ int git_iterator_for_workdir_ext(
 	wi->fi.update_entry_cb = workdir_iterator__update_entry;
 
 	if ((error = iterator__update_ignore_case((git_iterator *)wi, flags)) < 0 ||
-		(error = git_ignore__for_path(repo, ".gitignore", &wi->ignores)) < 0)
+		(error = git_ignore__for_path(repo, "", &wi->ignores)) < 0)
 	{
 		git_iterator_free((git_iterator *)wi);
 		return error;
 	}
 
-	if (tree && (error = git_object_dup((git_object **)&wi->tree, (git_object *)tree)) < 0)
-		return error;
-
-	wi->index = index;
-	if (index && (error = git_index_snapshot_new(&wi->index_snapshot, index)) < 0) {
-		git_iterator_free((git_iterator *)wi);
-		return error;
-	}
-	wi->entry_srch = iterator__ignore_case(wi) ?
-		git_index_entry_isrch : git_index_entry_srch;
-
-
-	/* try to look up precompose and set flag if appropriate */
-	if (git_repository__cvar(&precompose, repo, GIT_CVAR_PRECOMPOSE) < 0)
-		giterr_clear();
-	else if (precompose)
-		wi->fi.base.flags |= GIT_ITERATOR_PRECOMPOSE_UNICODE;
-
-	return fs_iterator__initialize(out, &wi->fi, repo_workdir);
+	return fs_iterator__initialize(out, &wi->fi, git_repository_workdir(repo));
 }
+
 
 void git_iterator_free(git_iterator *iter)
 {
@@ -1699,20 +1367,6 @@ int git_iterator_current_parent_tree(
 	return 0;
 }
 
-static void workdir_iterator_update_is_ignored(workdir_iterator *wi)
-{
-	git_dir_flag dir_flag = git_entry__dir_flag(&wi->fi.entry);
-
-	if (git_ignore__lookup(&wi->is_ignored, &wi->ignores, wi->fi.entry.path, dir_flag) < 0) {
-		giterr_clear();
-		wi->is_ignored = GIT_IGNORE_NOTFOUND;
-	}
-
-	/* use ignore from containing frame stack */
-	if (wi->is_ignored <= GIT_IGNORE_NOTFOUND)
-		wi->is_ignored = wi->fi.stack->is_ignored;
-}
-
 bool git_iterator_current_is_ignored(git_iterator *iter)
 {
 	workdir_iterator *wi = (workdir_iterator *)iter;
@@ -1720,22 +1374,14 @@ bool git_iterator_current_is_ignored(git_iterator *iter)
 	if (iter->type != GIT_ITERATOR_TYPE_WORKDIR)
 		return false;
 
-	if (wi->is_ignored != GIT_IGNORE_UNCHECKED)
-		return (bool)(wi->is_ignored == GIT_IGNORE_TRUE);
+	if (wi->is_ignored != -1)
+		return (bool)(wi->is_ignored != 0);
 
-	workdir_iterator_update_is_ignored(wi);
+	if (git_ignore__lookup(
+			&wi->ignores, wi->fi.entry.path, &wi->is_ignored) < 0)
+		wi->is_ignored = true;
 
-	return (bool)(wi->is_ignored == GIT_IGNORE_TRUE);
-}
-
-bool git_iterator_current_tree_is_ignored(git_iterator *iter)
-{
-	workdir_iterator *wi = (workdir_iterator *)iter;
-
-	if (iter->type != GIT_ITERATOR_TYPE_WORKDIR)
-		return false;
-
-	return (bool)(wi->fi.stack->is_ignored == GIT_IGNORE_TRUE);
+	return (bool)wi->is_ignored;
 }
 
 int git_iterator_cmp(git_iterator *iter, const char *path_prefix)
@@ -1763,172 +1409,4 @@ int git_iterator_current_workdir_path(git_buf **path, git_iterator *iter)
 		*path = &wi->fi.path;
 
 	return 0;
-}
-
-int git_iterator_index(git_index **out, git_iterator *iter)
-{
-	workdir_iterator *wi = (workdir_iterator *)iter;
-
-	if (iter->type != GIT_ITERATOR_TYPE_WORKDIR)
-		*out = NULL;
-
-	*out = wi->index;
-
-	return 0;
-}
-
-int git_iterator_advance_over_with_status(
-	const git_index_entry **entryptr,
-	git_iterator_status_t *status,
-	git_iterator *iter)
-{
-	int error = 0;
-	workdir_iterator *wi = (workdir_iterator *)iter;
-	char *base = NULL;
-	const git_index_entry *entry;
-
-	*status = GIT_ITERATOR_STATUS_NORMAL;
-
-	if (iter->type != GIT_ITERATOR_TYPE_WORKDIR)
-		return git_iterator_advance(entryptr, iter);
-	if ((error = git_iterator_current(&entry, iter)) < 0)
-		return error;
-
-	if (!S_ISDIR(entry->mode)) {
-		workdir_iterator_update_is_ignored(wi);
-		if (wi->is_ignored == GIT_IGNORE_TRUE)
-			*status = GIT_ITERATOR_STATUS_IGNORED;
-		return git_iterator_advance(entryptr, iter);
-	}
-
-	*status = GIT_ITERATOR_STATUS_EMPTY;
-
-	base = git__strdup(entry->path);
-	GITERR_CHECK_ALLOC(base);
-
-	/* scan inside directory looking for a non-ignored item */
-	while (entry && !iter->prefixcomp(entry->path, base)) {
-		workdir_iterator_update_is_ignored(wi);
-
-		/* if we found an explicitly ignored item, then update from
-		 * EMPTY to IGNORED
-		 */
-		if (wi->is_ignored == GIT_IGNORE_TRUE)
-			*status = GIT_ITERATOR_STATUS_IGNORED;
-		else if (S_ISDIR(entry->mode)) {
-			error = git_iterator_advance_into(&entry, iter);
-
-			if (!error)
-				continue;
-			else if (error == GIT_ENOTFOUND) {
-				error = 0;
-				wi->is_ignored = GIT_IGNORE_TRUE; /* mark empty dirs ignored */
-			} else
-				break; /* real error, stop here */
-		} else {
-			/* we found a non-ignored item, treat parent as untracked */
-			*status = GIT_ITERATOR_STATUS_NORMAL;
-			break;
-		}
-
-		if ((error = git_iterator_advance(&entry, iter)) < 0)
-			break;
-	}
-
-	/* wrap up scan back to base directory */
-	while (entry && !iter->prefixcomp(entry->path, base))
-		if ((error = git_iterator_advance(&entry, iter)) < 0)
-			break;
-
-	*entryptr = entry;
-	git__free(base);
-
-	return error;
-}
-
-int git_iterator_walk(
-	git_iterator **iterators,
-	size_t cnt,
-	git_iterator_walk_cb cb,
-	void *data)
-{
-	const git_index_entry **iterator_item;	/* next in each iterator */
-	const git_index_entry **cur_items;		/* current path in each iter */
-	const git_index_entry *first_match;
-	size_t i, j;
-	int error = 0;
-
-	iterator_item = git__calloc(cnt, sizeof(git_index_entry *));
-	cur_items = git__calloc(cnt, sizeof(git_index_entry *));
-
-	GITERR_CHECK_ALLOC(iterator_item);
-	GITERR_CHECK_ALLOC(cur_items);
-
-	/* Set up the iterators */
-	for (i = 0; i < cnt; i++) {
-		error = git_iterator_current(&iterator_item[i], iterators[i]);
-
-		if (error < 0 && error != GIT_ITEROVER)
-			goto done;
-	}
-
-	while (true) {
-		for (i = 0; i < cnt; i++)
-			cur_items[i] = NULL;
-
-		first_match = NULL;
-
-		/* Find the next path(s) to consume from each iterator */
-		for (i = 0; i < cnt; i++) {
-			if (iterator_item[i] == NULL)
-				continue;
-
-			if (first_match == NULL) {
-				first_match = iterator_item[i];
-				cur_items[i] = iterator_item[i];
-			} else {
-				int path_diff = git_index_entry_cmp(iterator_item[i], first_match);
-
-				if (path_diff < 0) {
-					/* Found an index entry that sorts before the one we're
-					 * looking at.  Forget that we've seen the other and
-					 * look at the other iterators for this path.
-					 */
-					for (j = 0; j < i; j++)
-						cur_items[j] = NULL;
-
-					first_match = iterator_item[i];
-					cur_items[i] = iterator_item[i];
-				} else if (path_diff == 0) {
-					cur_items[i] = iterator_item[i];
-				}
-			}
-		}
-
-		if (first_match == NULL)
-			break;
-
-		if ((error = cb(cur_items, data)) != 0)
-			goto done;
-
-		/* Advance each iterator that participated */
-		for (i = 0; i < cnt; i++) {
-			if (cur_items[i] == NULL)
-				continue;
-
-			error = git_iterator_advance(&iterator_item[i], iterators[i]);
-
-			if (error < 0 && error != GIT_ITEROVER)
-				goto done;
-		}
-	}
-
-done:
-	git__free((git_index_entry **)iterator_item);
-	git__free((git_index_entry **)cur_items);
-
-	if (error == GIT_ITEROVER)
-		error = 0;
-
-	return error;
 }

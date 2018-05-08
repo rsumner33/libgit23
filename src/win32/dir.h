@@ -8,19 +8,18 @@
 #define INCLUDE_dir_h__
 
 #include "common.h"
-#include "w32_util.h"
 
 struct git__dirent {
 	int d_ino;
-	git_win32_utf8_path d_name;
+	char d_name[261];
 };
 
 typedef struct {
 	HANDLE h;
 	WIN32_FIND_DATAW f;
 	struct git__dirent entry;
+	char *dir;
 	int first;
-	char dir[GIT_FLEX_ARRAY];
 } git__DIR;
 
 extern git__DIR *git__opendir(const char *);

@@ -823,13 +823,15 @@ static void pending_number(struct tm *tm, int *num)
 }
 
 static git_time_t approxidate_str(const char *date,
-	time_t time_sec,
-	int *error_ret)
+                                  const struct timeval *tv,
+                                  int *error_ret)
 {
 	int number = 0;
 	int touched = 0;
 	struct tm tm = {0}, now;
+	time_t time_sec;
 
+	time_sec = tv->tv_sec;
 	p_localtime_r(&time_sec, &tm);
 	now = tm;
 
@@ -859,46 +861,16 @@ static git_time_t approxidate_str(const char *date,
 
 int git__date_parse(git_time_t *out, const char *date)
 {
-	time_t time_sec;
+	struct timeval tv;
 	git_time_t timestamp;
 	int offset, error_ret=0;
 
 	if (!parse_date_basic(date, &timestamp, &offset)) {
-		*out = timestamp;
+      *out = timestamp;
 		return 0;
 	}
 
-	if (time(&time_sec) == -1)
-		return -1;
-
-	*out = approxidate_str(date, time_sec, &error_ret);
+	p_gettimeofday(&tv, NULL);
+	*out = approxidate_str(date, &tv, &error_ret);
    return error_ret;
 }
-
-int git__date_rfc2822_fmt(char *out, size_t len, const git_time *date)
-{
-	int written;
-	struct tm gmt;
-	time_t t;
-
-	assert(out && date);
-
-	t = (time_t) (date->time + date->offset * 60);
-
-	if (p_gmtime_r (&t, &gmt) == NULL)
-		return -1;
-
-	written = p_snprintf(out, len, "%.3s, %u %.3s %.4u %02u:%02u:%02u %+03d%02d",
-		weekday_names[gmt.tm_wday],
-		gmt.tm_mday,
-		month_names[gmt.tm_mon],
-		gmt.tm_year + 1900,
-		gmt.tm_hour, gmt.tm_min, gmt.tm_sec,
-		date->offset / 60, date->offset % 60);
-
-	if (written < 0 || (written > (int) len - 1))
-		return -1;
-
-	return 0;
-}
-

@@ -99,7 +99,7 @@ const char *p_gai_strerror(int ret)
 
 #endif /* NO_ADDRINFO */
 
-int p_open(const char *path, volatile int flags, ...)
+int p_open(const char *path, int flags, ...)
 {
 	mode_t mode = 0;
 
@@ -111,12 +111,12 @@ int p_open(const char *path, volatile int flags, ...)
 		va_end(arg_list);
 	}
 
-	return open(path, flags | O_BINARY | O_CLOEXEC, mode);
+	return open(path, flags | O_BINARY, mode);
 }
 
 int p_creat(const char *path, mode_t mode)
 {
-	return open(path, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY | O_CLOEXEC, mode);
+	return open(path, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, mode);
 }
 
 int p_getcwd(char *buffer_out, size_t size)
@@ -151,22 +151,15 @@ int p_rename(const char *from, const char *to)
 
 #endif /* GIT_WIN32 */
 
-ssize_t p_read(git_file fd, void *buf, size_t cnt)
+int p_read(git_file fd, void *buf, size_t cnt)
 {
 	char *b = buf;
-
-	if (!git__is_ssizet(cnt)) {
-#ifdef GIT_WIN32
-		SetLastError(ERROR_INVALID_PARAMETER);
-#endif
-		errno = EINVAL;
-		return -1;
-	}
 
 	while (cnt) {
 		ssize_t r;
 #ifdef GIT_WIN32
-		r = read(fd, b, cnt > INT_MAX ? INT_MAX : (unsigned int)cnt);
+		assert((size_t)((unsigned int)cnt) == cnt);
+		r = read(fd, b, (unsigned int)cnt);
 #else
 		r = read(fd, b, cnt);
 #endif
@@ -180,7 +173,7 @@ ssize_t p_read(git_file fd, void *buf, size_t cnt)
 		cnt -= r;
 		b += r;
 	}
-	return (b - (char *)buf);
+	return (int)(b - (char *)buf);
 }
 
 int p_write(git_file fd, const void *buf, size_t cnt)
@@ -196,7 +189,7 @@ int p_write(git_file fd, const void *buf, size_t cnt)
 		r = write(fd, b, cnt);
 #endif
 		if (r < 0) {
-			if (errno == EINTR || GIT_ISBLOCKED(errno))
+			if (errno == EINTR || errno == EAGAIN)
 				continue;
 			return -1;
 		}
@@ -210,50 +203,4 @@ int p_write(git_file fd, const void *buf, size_t cnt)
 	return 0;
 }
 
-#ifdef NO_MMAP
 
-#include "map.h"
-
-int git__page_size(size_t *page_size)
-{
-	/* dummy; here we don't need any alignment anyway */
-	*page_size = 4096;
-	return 0;
-}
-
-
-int p_mmap(git_map *out, size_t len, int prot, int flags, int fd, git_off_t offset)
-{
-	GIT_MMAP_VALIDATE(out, len, prot, flags);
-
-	out->data = NULL;
-	out->len = 0;
-
-	if ((prot & GIT_PROT_WRITE) && ((flags & GIT_MAP_TYPE) == GIT_MAP_SHARED)) {
-		giterr_set(GITERR_OS, "Trying to map shared-writeable");
-		return -1;
-	}
-
-	out->data = malloc(len);
-	GITERR_CHECK_ALLOC(out->data);
-
-	if (!git__is_ssizet(len) ||
-		(p_lseek(fd, offset, SEEK_SET) < 0) ||
-		(p_read(fd, out->data, len) != (ssize_t)len)) {
-		giterr_set(GITERR_OS, "mmap emulation failed");
-		return -1;
-	}
-
-	out->len = len;
-	return 0;
-}
-
-int p_munmap(git_map *map)
-{
-	assert(map != NULL);
-	free(map->data);
-
-	return 0;
-}
-
-#endif

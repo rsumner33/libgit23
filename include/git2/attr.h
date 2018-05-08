@@ -76,28 +76,25 @@ GIT_BEGIN_DECL
  */
 #define GIT_ATTR_HAS_VALUE(attr) (git_attr_value(attr) == GIT_ATTR_VALUE_T)
 
-/**
- * Possible states for an attribute
- */
 typedef enum {
-	GIT_ATTR_UNSPECIFIED_T = 0, /**< The attribute has been left unspecified */
-	GIT_ATTR_TRUE_T,  /**< The attribute has been set */
-	GIT_ATTR_FALSE_T, /**< The attribute has been unset */
-	GIT_ATTR_VALUE_T, /**< This attribute has a value */
+	GIT_ATTR_UNSPECIFIED_T = 0,
+	GIT_ATTR_TRUE_T,
+	GIT_ATTR_FALSE_T,
+	GIT_ATTR_VALUE_T,
 } git_attr_t;
 
-/**
- * Return the value type for a given attribute.
+/*
+ *	Return the value type for a given attribute.
  *
- * This can be either `TRUE`, `FALSE`, `UNSPECIFIED` (if the attribute
- * was not set at all), or `VALUE`, if the attribute was set to an
- * actual string.
+ *	This can be either `TRUE`, `FALSE`, `UNSPECIFIED` (if the attribute
+ *	was not set at all), or `VALUE`, if the attribute was set to
+ *	an actual string.
  *
- * If the attribute has a `VALUE` string, it can be accessed normally
- * as a NULL-terminated C string.
+ *	If the attribute has a `VALUE` string, it can be accessed normally
+ *	as a NULL-terminated C string.
  *
- * @param attr The attribute
- * @return the value type for the attribute
+ *	@param attr The attribute
+ *	@return the value type for the attribute
  */
 GIT_EXTERN(git_attr_t) git_attr_value(const char *attr);
 
@@ -144,7 +141,7 @@ GIT_EXTERN(git_attr_t) git_attr_value(const char *attr);
  */
 GIT_EXTERN(int) git_attr_get(
 	const char **value_out,
-	git_repository *repo,
+    git_repository *repo,
 	uint32_t flags,
 	const char *path,
 	const char *name);
@@ -165,7 +162,7 @@ GIT_EXTERN(int) git_attr_get(
  * Then you could loop through the 3 values to get the settings for
  * the three attributes you asked about.
  *
- * @param values_out An array of num_attr entries that will have string
+ * @param values An array of num_attr entries that will have string
  *             pointers written into it for the values of the attributes.
  *             You should not modify or free the values that are written
  *             into this array (although of course, you should free the
@@ -202,9 +199,8 @@ typedef int (*git_attr_foreach_cb)(const char *name, const char *value, void *pa
  *             only once per attribute name, even if there are multiple
  *             rules for a given file.  The highest priority rule will be
  *             used.  Return a non-zero value from this to stop looping.
- *             The value will be returned from `git_attr_foreach`.
  * @param payload Passed on as extra parameter to callback function.
- * @return 0 on success, non-zero callback return value, or error code
+ * @return 0 on success, GIT_EUSER on non-zero callback, or error code
  */
 GIT_EXTERN(int) git_attr_foreach(
 	git_repository *repo,

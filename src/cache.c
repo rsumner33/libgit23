@@ -50,29 +50,25 @@ void git_cache_dump_stats(git_cache *cache)
 	if (kh_size(cache->map) == 0)
 		return;
 
-	printf("Cache %p: %d items cached, %"PRIdZ" bytes\n",
-		cache, kh_size(cache->map), cache->used_memory);
+	printf("Cache %p: %d items cached, %d bytes\n",
+		cache, kh_size(cache->map), (int)cache->used_memory);
 
 	kh_foreach_value(cache->map, object, {
 		char oid_str[9];
-		printf(" %s%c %s (%"PRIuZ")\n",
+		printf(" %s%c %s (%d)\n",
 			git_object_type2string(object->type),
 			object->flags == GIT_CACHE_STORE_PARSED ? '*' : ' ',
 			git_oid_tostr(oid_str, sizeof(oid_str), &object->oid),
-			object->size
+			(int)object->size
 		);
 	});
 }
 
 int git_cache_init(git_cache *cache)
 {
-	memset(cache, 0, sizeof(*cache));
+	cache->used_memory = 0;
 	cache->map = git_oidmap_alloc();
-	GITERR_CHECK_ALLOC(cache->map);
-	if (git_rwlock_init(&cache->lock)) {
-		giterr_set(GITERR_OS, "Failed to initialize cache rwlock");
-		return -1;
-	}
+	git_mutex_init(&cache->lock);
 	return 0;
 }
 
@@ -95,20 +91,20 @@ static void clear_cache(git_cache *cache)
 
 void git_cache_clear(git_cache *cache)
 {
-	if (git_rwlock_wrlock(&cache->lock) < 0)
+	if (git_mutex_lock(&cache->lock) < 0)
 		return;
 
 	clear_cache(cache);
 
-	git_rwlock_wrunlock(&cache->lock);
+	git_mutex_unlock(&cache->lock);
 }
 
 void git_cache_free(git_cache *cache)
 {
 	git_cache_clear(cache);
+
 	git_oidmap_free(cache->map);
-	git_rwlock_free(&cache->lock);
-	git__memzero(cache, sizeof(*cache));
+	git_mutex_free(&cache->lock);
 }
 
 /* Called with lock */
@@ -153,7 +149,7 @@ static void *cache_get(git_cache *cache, const git_oid *oid, unsigned int flags)
 	khiter_t pos;
 	git_cached_obj *entry = NULL;
 
-	if (!git_cache__enabled || git_rwlock_rdlock(&cache->lock) < 0)
+	if (!git_cache__enabled || git_mutex_lock(&cache->lock) < 0)
 		return NULL;
 
 	pos = kh_get(oid, cache->map, oid);
@@ -167,7 +163,7 @@ static void *cache_get(git_cache *cache, const git_oid *oid, unsigned int flags)
 		}
 	}
 
-	git_rwlock_rdunlock(&cache->lock);
+	git_mutex_unlock(&cache->lock);
 
 	return entry;
 }
@@ -178,15 +174,10 @@ static void *cache_store(git_cache *cache, git_cached_obj *entry)
 
 	git_cached_obj_incref(entry);
 
-	if (!git_cache__enabled && cache->used_memory > 0) {
-		git_cache_clear(cache);
-		return entry;
-	}
-
 	if (!cache_should_store(entry->type, entry->size))
 		return entry;
 
-	if (git_rwlock_wrlock(&cache->lock) < 0)
+	if (git_mutex_lock(&cache->lock) < 0)
 		return entry;
 
 	/* soften the load on the cache */
@@ -228,7 +219,7 @@ static void *cache_store(git_cache *cache, git_cached_obj *entry)
 		}
 	}
 
-	git_rwlock_wrunlock(&cache->lock);
+	git_mutex_unlock(&cache->lock);
 	return entry;
 }
 

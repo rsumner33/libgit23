@@ -15,9 +15,4 @@ int sha1_entry_pos(const void *table,
 			unsigned lo, unsigned hi, unsigned nr,
 			const unsigned char *key);
 
-int sha1_position(const void *table,
-			size_t stride,
-			unsigned lo, unsigned hi,
-			const unsigned char *key);
-
 #endif

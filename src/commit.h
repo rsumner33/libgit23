@@ -10,24 +10,21 @@
 #include "git2/commit.h"
 #include "tree.h"
 #include "repository.h"
-#include "array.h"
+#include "vector.h"
 
 #include <time.h>
 
 struct git_commit {
 	git_object object;
 
-	git_array_t(git_oid) parent_ids;
+	git_vector parent_ids;
 	git_oid tree_id;
 
 	git_signature *author;
 	git_signature *committer;
 
 	char *message_encoding;
-	char *raw_message;
-	char *raw_header;
-
-	char *summary;
+	char *message;
 };
 
 void git_commit__free(void *commit);

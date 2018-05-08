@@ -9,10 +9,9 @@
 
 #include "git2/remote.h"
 #include "git2/transport.h"
-#include "git2/sys/transport.h"
 
 #include "refspec.h"
-#include "vector.h"
+#include "repository.h"
 
 #define GIT_REMOTE_ORIGIN "origin"
 
@@ -22,16 +21,16 @@ struct git_remote {
 	char *pushurl;
 	git_vector refs;
 	git_vector refspecs;
-	git_vector active_refspecs;
-	git_vector passive_refspecs;
+	git_cred_acquire_cb cred_acquire_cb;
+	void *cred_acquire_payload;
 	git_transport *transport;
 	git_repository *repo;
-	git_push *push;
+	git_remote_callbacks callbacks;
 	git_transfer_progress stats;
 	unsigned int need_pack;
 	git_remote_autotag_option_t download_tags;
-	int prune_refs;
-	int passed_refspecs;
+	unsigned int check_cert;
+	unsigned int update_fetchhead;
 };
 
 const char* git_remote__urlfordirection(struct git_remote *remote, int direction);

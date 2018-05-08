@@ -9,6 +9,19 @@
 # include <unistd.h>
 #endif
 
+/* Shamelessly borrowed from http://stackoverflow.com/questions/3417837/
+ * with permission of the original author, Martin Pool.
+ * http://sourcefrog.net/weblog/software/languages/C/unused.html
+ */
+#ifdef UNUSED
+#elif defined(__GNUC__)
+# define UNUSED(x) UNUSED_ ## x __attribute__((unused))
+#elif defined(__LCLINT__)
+# define UNUSED(x) /*@unused@*/ x
+#else
+# define UNUSED(x) x
+#endif
+
 typedef struct progress_data {
 	git_transfer_progress fetch_progress;
 	size_t completed_steps;
@@ -18,41 +31,20 @@ typedef struct progress_data {
 
 static void print_progress(const progress_data *pd)
 {
-	int network_percent = pd->fetch_progress.total_objects > 0 ?
-		(100*pd->fetch_progress.received_objects) / pd->fetch_progress.total_objects :
-		0;
-	int index_percent = pd->fetch_progress.total_objects > 0 ?
-		(100*pd->fetch_progress.indexed_objects) / pd->fetch_progress.total_objects :
-		0;
-
+	int network_percent = (100*pd->fetch_progress.received_objects) / pd->fetch_progress.total_objects;
+	int index_percent = (100*pd->fetch_progress.indexed_objects) / pd->fetch_progress.total_objects;
 	int checkout_percent = pd->total_steps > 0
 		? (100 * pd->completed_steps) / pd->total_steps
-		: 0;
+		: 0.f;
 	int kbytes = pd->fetch_progress.received_bytes / 1024;
 
-	if (pd->fetch_progress.total_objects &&
-		pd->fetch_progress.received_objects == pd->fetch_progress.total_objects) {
-		printf("Resolving deltas %d/%d\r",
-		       pd->fetch_progress.indexed_deltas,
-		       pd->fetch_progress.total_deltas);
-	} else {
-		printf("net %3d%% (%4d kb, %5d/%5d)  /  idx %3d%% (%5d/%5d)  /  chk %3d%% (%4" PRIuZ "/%4" PRIuZ ") %s\n",
+	printf("net %3d%% (%4d kb, %5d/%5d)  /  idx %3d%% (%5d/%5d)  /  chk %3d%% (%4" PRIuZ "/%4" PRIuZ ") %s\n",
 		   network_percent, kbytes,
 		   pd->fetch_progress.received_objects, pd->fetch_progress.total_objects,
 		   index_percent, pd->fetch_progress.indexed_objects, pd->fetch_progress.total_objects,
 		   checkout_percent,
 		   pd->completed_steps, pd->total_steps,
 		   pd->path);
-	}
-}
-
-static int sideband_progress(const char *str, int len, void *payload)
-{
-	(void)payload; // unused
-
-	printf("remote: %*s", len, str);
-	fflush(stdout);
-	return 0;
 }
 
 static int fetch_progress(const git_transfer_progress *stats, void *payload)
@@ -71,13 +63,31 @@ static void checkout_progress(const char *path, size_t cur, size_t tot, void *pa
 	print_progress(pd);
 }
 
+static int cred_acquire(git_cred **out,
+		const char * UNUSED(url),
+		const char * UNUSED(username_from_url),
+		unsigned int UNUSED(allowed_types),
+		void * UNUSED(payload))
+{
+	char username[128] = {0};
+	char password[128] = {0};
+
+	printf("Username: ");
+	scanf("%s", username);
+
+	/* Yup. Right there on your terminal. Careful where you copy/paste output. */
+	printf("Password: ");
+	scanf("%s", password);
+
+	return git_cred_userpass_plaintext_new(out, username, password);
+}
 
 int do_clone(git_repository *repo, int argc, char **argv)
 {
 	progress_data pd = {{0}};
 	git_repository *cloned_repo = NULL;
 	git_clone_options clone_opts = GIT_CLONE_OPTIONS_INIT;
-	git_checkout_options checkout_opts = GIT_CHECKOUT_OPTIONS_INIT;
+	git_checkout_opts checkout_opts = GIT_CHECKOUT_OPTS_INIT;
 	const char *url = argv[1];
 	const char *path = argv[2];
 	int error;
@@ -91,14 +101,13 @@ int do_clone(git_repository *repo, int argc, char **argv)
 	}
 
 	// Set up options
-	checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE;
+	checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE_CREATE;
 	checkout_opts.progress_cb = checkout_progress;
 	checkout_opts.progress_payload = &pd;
 	clone_opts.checkout_opts = checkout_opts;
-	clone_opts.fetch_opts.callbacks.sideband_progress = sideband_progress;
-	clone_opts.fetch_opts.callbacks.transfer_progress = &fetch_progress;
-	clone_opts.fetch_opts.callbacks.credentials = cred_acquire_cb;
-	clone_opts.fetch_opts.callbacks.payload = &pd;
+	clone_opts.fetch_progress_cb = &fetch_progress;
+	clone_opts.fetch_progress_payload = &pd;
+	clone_opts.cred_acquire_cb = cred_acquire;
 
 	// Do the clone
 	error = git_clone(&cloned_repo, url, path, &clone_opts);

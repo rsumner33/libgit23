@@ -20,45 +20,9 @@
  */
 GIT_BEGIN_DECL
 
-
-/**
- * Every backend's iterator must have a pointer to itself as the first
- * element, so the API can talk to it. You'd define your iterator as
- *
- *     struct my_iterator {
- *             git_reference_iterator parent;
- *             ...
- *     }
- *
- * and assign `iter->parent.backend` to your `git_refdb_backend`.
- */
-struct git_reference_iterator {
-	git_refdb *db;
-
-	/**
-	 * Return the current reference and advance the iterator.
-	 */
-	int (*next)(
-		git_reference **ref,
-		git_reference_iterator *iter);
-
-	/**
-	 * Return the name of the current reference and advance the iterator
-	 */
-	int (*next_name)(
-		const char **ref_name,
-		git_reference_iterator *iter);
-
-	/**
-	 * Free the iterator
-	 */
-	void (*free)(
-		git_reference_iterator *iter);
-};
-
 /** An instance for a custom backend */
 struct git_refdb_backend {
-	unsigned int version;
+    unsigned int version;
 
 	/**
 	 * Queries the refdb backend to determine if the given ref_name
@@ -79,35 +43,39 @@ struct git_refdb_backend {
 		const char *ref_name);
 
 	/**
-	 * Allocate an iterator object for the backend.
-	 *
-	 * A refdb implementation must provide this function.
+	 * Enumerates each reference in the refdb.  A refdb implementation must
+	 * provide this function.
 	 */
-	int (*iterator)(
-		git_reference_iterator **iter,
-		struct git_refdb_backend *backend,
-		const char *glob);
+	int (*foreach)(
+		git_refdb_backend *backend,
+		unsigned int list_flags,
+		git_reference_foreach_cb callback,
+		void *payload);
 
-	/*
+	/**
+	 * Enumerates each reference in the refdb that matches the given
+	 * glob string.  A refdb implementation may provide this function;
+	 * if it is not provided, foreach will be used and the results filtered
+	 * against the glob.
+	 */
+	int (*foreach_glob)(
+		git_refdb_backend *backend,
+		const char *glob,
+		unsigned int list_flags,
+		git_reference_foreach_cb callback,
+		void *payload);
+
+	/**
 	 * Writes the given reference to the refdb.  A refdb implementation
 	 * must provide this function.
 	 */
-	int (*write)(git_refdb_backend *backend,
-		     const git_reference *ref, int force,
-		     const git_signature *who, const char *message,
-		     const git_oid *old, const char *old_target);
-
-	int (*rename)(
-		git_reference **out, git_refdb_backend *backend,
-		const char *old_name, const char *new_name, int force,
-		const git_signature *who, const char *message);
+	int (*write)(git_refdb_backend *backend, const git_reference *ref);
 
 	/**
-	 * Deletes the given reference (and if necessary its reflog)
-	 * from the refdb.  A refdb implementation must provide this
-	 * function.
+	 * Deletes the given reference from the refdb.  A refdb implementation
+	 * must provide this function.
 	 */
-	int (*del)(git_refdb_backend *backend, const char *ref_name, const git_oid *old_id, const char *old_target);
+	int (*delete)(git_refdb_backend *backend, const git_reference *ref);
 
 	/**
 	 * Suggests that the given refdb compress or optimize its references.
@@ -119,70 +87,14 @@ struct git_refdb_backend {
 	int (*compress)(git_refdb_backend *backend);
 
 	/**
-	 * Query whether a particular reference has a log (may be empty)
-	 */
-	int (*has_log)(git_refdb_backend *backend, const char *refname);
-
-	/**
-	 * Make sure a particular reference will have a reflog which
-	 * will be appended to on writes.
-	 */
-	int (*ensure_log)(git_refdb_backend *backend, const char *refname);
-
-	/**
 	 * Frees any resources held by the refdb.  A refdb implementation may
 	 * provide this function; if it is not provided, nothing will be done.
 	 */
 	void (*free)(git_refdb_backend *backend);
-
-	/**
-	 * Read the reflog for the given reference name.
-	 */
-	int (*reflog_read)(git_reflog **out, git_refdb_backend *backend, const char *name);
-
-	/**
-	 * Write a reflog to disk.
-	 */
-	int (*reflog_write)(git_refdb_backend *backend, git_reflog *reflog);
-
-	/**
-	 * Rename a reflog
-	 */
-	int (*reflog_rename)(git_refdb_backend *_backend, const char *old_name, const char *new_name);
-
-	/**
-	 * Remove a reflog.
-	 */
-	int (*reflog_delete)(git_refdb_backend *backend, const char *name);
-
-	/**
-	 * Lock a reference. The opaque parameter will be passed to the unlock function
-	 */
-	int (*lock)(void **payload_out, git_refdb_backend *backend, const char *refname);
-
-	/**
-	 * Unlock a reference. Only one of target or symbolic_target
-	 * will be set. success indicates whether to update the
-	 * reference or discard the lock (if it's false)
-	 */
-	int (*unlock)(git_refdb_backend *backend, void *payload, int success, int update_reflog,
-		      const git_reference *ref, const git_signature *sig, const char *message);
 };
 
-#define GIT_REFDB_BACKEND_VERSION 1
-#define GIT_REFDB_BACKEND_INIT {GIT_REFDB_BACKEND_VERSION}
-
-/**
- * Initializes a `git_refdb_backend` with default values. Equivalent to
- * creating an instance with GIT_REFDB_BACKEND_INIT.
- *
- * @param backend the `git_refdb_backend` struct to initialize
- * @param version Version of struct; pass `GIT_REFDB_BACKEND_VERSION`
- * @return Zero on success; -1 on failure.
- */
-GIT_EXTERN(int) git_refdb_init_backend(
-	git_refdb_backend *backend,
-	unsigned int version);
+#define GIT_ODB_BACKEND_VERSION 1
+#define GIT_ODB_BACKEND_INIT {GIT_ODB_BACKEND_VERSION}
 
 /**
  * Constructors for default filesystem-based refdb backend

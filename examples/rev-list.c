@@ -1,43 +1,17 @@
-/*
- * libgit2 "rev-list" example - shows how to transform a rev-spec into a list
- * of commit ids
- *
- * Written by the libgit2 contributors
- *
- * To the extent possible under law, the author(s) have dedicated all copyright
- * and related and neighboring rights to this software to the public domain
- * worldwide. This software is distributed without any warranty.
- *
- * You should have received a copy of the CC0 Public Domain Dedication along
- * with this software. If not, see
- * <http://creativecommons.org/publicdomain/zero/1.0/>.
- */
+#include <stdio.h>
+#include <string.h>
 
-#include "common.h"
+#include <git2.h>
 
-static int revwalk_parseopts(git_repository *repo, git_revwalk *walk, int nopts, char **opts);
-
-int main (int argc, char **argv)
+static void check_error(int error_code, const char *action)
 {
-	git_repository *repo;
-	git_revwalk *walk;
-	git_oid oid;
-	char buf[GIT_OID_HEXSZ+1];
+	if (!error_code)
+		return;
 
-	git_libgit2_init();
-
-	check_lg2(git_repository_open_ext(&repo, ".", 0, NULL), "opening repository", NULL);
-	check_lg2(git_revwalk_new(&walk, repo), "allocating revwalk", NULL);
-	check_lg2(revwalk_parseopts(repo, walk, argc-1, argv+1), "parsing options", NULL);
-
-	while (!git_revwalk_next(&oid, walk)) {
-		git_oid_fmt(buf, &oid);
-		buf[GIT_OID_HEXSZ] = '\0';
-		printf("%s\n", buf);
-	}
-
-	git_libgit2_shutdown();
-	return 0;
+	const git_error *error = giterr_last();
+	fprintf(stderr, "Error %d %s: %s\n", -error_code, action,
+	        (error && error->message) ? error->message : "???");
+	exit(1);
 }
 
 static int push_commit(git_revwalk *walk, const git_oid *oid, int hide)
@@ -114,6 +88,31 @@ static int revwalk_parseopts(git_repository *repo, git_revwalk *walk, int nopts,
 			if ((error = push_spec(repo, walk, opts[i], hide)))
 				return error;
 		}
+	}
+
+	return 0;
+}
+
+int main (int argc, char **argv)
+{
+	int error;
+	git_repository *repo;
+	git_revwalk *walk;
+	git_oid oid;
+	char buf[41];
+
+	error = git_repository_open_ext(&repo, ".", 0, NULL);
+	check_error(error, "opening repository");
+
+	error = git_revwalk_new(&walk, repo);
+	check_error(error, "allocating revwalk");
+	error = revwalk_parseopts(repo, walk, argc-1, argv+1);
+	check_error(error, "parsing options");
+
+	while (!git_revwalk_next(&oid, walk)) {
+		git_oid_fmt(buf, &oid);
+		buf[40] = '\0';
+		printf("%s\n", buf);
 	}
 
 	return 0;

@@ -3,115 +3,161 @@
  *
  * This file is part of libgit2, distributed under the GNU GPL v2 with
  * a Linking Exception. For full terms see the included COPYING file.
+ *
+ * This file is based on a modified version of the priority queue found
+ * in the Apache project and libpqueue library.
+ * 
+ * https://github.com/vy/libpqueue
+ * 
+ * Original file notice:
+ * 
+ * Copyright 2010 Volkan Yazici <volkan.yazici@gmail.com>
+ * Copyright 2006-2010 The Apache Software Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
  */
 
+#include "common.h"
 #include "pqueue.h"
-#include "util.h"
 
-#define PQUEUE_LCHILD_OF(I) (((I)<<1)+1)
-#define PQUEUE_RCHILD_OF(I) (((I)<<1)+2)
-#define PQUEUE_PARENT_OF(I) (((I)-1)>>1)
+#define left(i)	((i) << 1)
+#define right(i) (((i) << 1) + 1)
+#define parent(i) ((i) >> 1)
 
-int git_pqueue_init(
-	git_pqueue *pq,
-	uint32_t flags,
-	size_t init_size,
-	git_vector_cmp cmp)
+int git_pqueue_init(git_pqueue *q, size_t n, git_pqueue_cmp cmppri)
 {
-	int error = git_vector_init(pq, init_size, cmp);
+	assert(q);
 
-	if (!error) {
-		/* mix in our flags */
-		pq->flags |= flags;
+	/* Need to allocate n+1 elements since element 0 isn't used. */
+	q->d = git__malloc((n + 1) * sizeof(void *));
+	GITERR_CHECK_ALLOC(q->d);
 
-		/* if fixed size heap, pretend vector is exactly init_size elements */
-		if ((flags & GIT_PQUEUE_FIXED_SIZE) && init_size > 0)
-			pq->_alloc_size = init_size;
-	}
+	q->size = 1;
+	q->avail = q->step = (n + 1); /* see comment above about n+1 */
+	q->cmppri = cmppri;
 
-	return error;
+	return 0;
 }
 
-static void pqueue_up(git_pqueue *pq, size_t el)
+
+void git_pqueue_free(git_pqueue *q)
 {
-	size_t parent_el = PQUEUE_PARENT_OF(el);
-	void *kid = git_vector_get(pq, el);
-
-	while (el > 0) {
-		void *parent = pq->contents[parent_el];
-
-		if (pq->_cmp(parent, kid) <= 0)
-			break;
-
-		pq->contents[el] = parent;
-
-		el = parent_el;
-		parent_el = PQUEUE_PARENT_OF(el);
-	}
-
-	pq->contents[el] = kid;
+	git__free(q->d);
+	q->d = NULL;
 }
 
-static void pqueue_down(git_pqueue *pq, size_t el)
+void git_pqueue_clear(git_pqueue *q)
 {
-	void *parent = git_vector_get(pq, el), *kid, *rkid;
-
-	while (1) {
-		size_t kid_el = PQUEUE_LCHILD_OF(el);
-
-		if ((kid = git_vector_get(pq, kid_el)) == NULL)
-			break;
-
-		if ((rkid = git_vector_get(pq, kid_el + 1)) != NULL &&
-			pq->_cmp(kid, rkid) > 0) {
-			kid    = rkid;
-			kid_el += 1;
-		}
-
-		if (pq->_cmp(parent, kid) <= 0)
-			break;
-
-		pq->contents[el] = kid;
-		el = kid_el;
-	}
-
-	pq->contents[el] = parent;
+	q->size = 1;
 }
 
-int git_pqueue_insert(git_pqueue *pq, void *item)
+size_t git_pqueue_size(git_pqueue *q)
 {
-	int error = 0;
-
-	/* if heap is full, pop the top element if new one should replace it */
-	if ((pq->flags & GIT_PQUEUE_FIXED_SIZE) != 0 &&
-		pq->length >= pq->_alloc_size)
-	{
-		/* skip this item if below min item in heap */
-		if (pq->_cmp(item, git_vector_get(pq, 0)) <= 0)
-			return 0;
-		/* otherwise remove the min item before inserting new */
-		(void)git_pqueue_pop(pq);
-	}
-
-	if (!(error = git_vector_insert(pq, item)))
-		pqueue_up(pq, pq->length - 1);
-
-	return error;
+	/* queue element 0 exists but doesn't count since it isn't used. */
+	return (q->size - 1);
 }
 
-void *git_pqueue_pop(git_pqueue *pq)
-{
-	void *rval = git_pqueue_get(pq, 0);
 
-	if (git_pqueue_size(pq) > 1) {
-		/* move last item to top of heap, shrink, and push item down */
-		pq->contents[0] = git_vector_last(pq);
-		git_vector_pop(pq);
-		pqueue_down(pq, 0);
-	} else {
-		/* all we need to do is shrink the heap in this case */
-		git_vector_pop(pq);
+static void bubble_up(git_pqueue *q, size_t i)
+{
+	size_t parent_node;
+	void *moving_node = q->d[i];
+
+	for (parent_node = parent(i);
+			((i > 1) && q->cmppri(q->d[parent_node], moving_node));
+			i = parent_node, parent_node = parent(i)) {
+		q->d[i] = q->d[parent_node];
 	}
 
-	return rval;
+	q->d[i] = moving_node;
+}
+
+
+static size_t maxchild(git_pqueue *q, size_t i)
+{
+	size_t child_node = left(i);
+
+	if (child_node >= q->size)
+		return 0;
+
+	if ((child_node + 1) < q->size &&
+		q->cmppri(q->d[child_node], q->d[child_node + 1]))
+		child_node++; /* use right child instead of left */
+
+	return child_node;
+}
+
+
+static void percolate_down(git_pqueue *q, size_t i)
+{
+	size_t child_node;
+	void *moving_node = q->d[i];
+
+	while ((child_node = maxchild(q, i)) != 0 &&
+			q->cmppri(moving_node, q->d[child_node])) {
+		q->d[i] = q->d[child_node];
+		i = child_node;
+	}
+
+	q->d[i] = moving_node;
+}
+
+
+int git_pqueue_insert(git_pqueue *q, void *d)
+{
+	void *tmp;
+	size_t i;
+	size_t newsize;
+
+	if (!q) return 1;
+
+	/* allocate more memory if necessary */
+	if (q->size >= q->avail) {
+		newsize = q->size + q->step;
+		tmp = git__realloc(q->d, sizeof(void *) * newsize);
+		GITERR_CHECK_ALLOC(tmp);
+
+		q->d = tmp;
+		q->avail = newsize;
+	}
+
+	/* insert item */
+	i = q->size++;
+	q->d[i] = d;
+	bubble_up(q, i);
+
+	return 0;
+}
+
+
+void *git_pqueue_pop(git_pqueue *q)
+{
+	void *head;
+
+	if (!q || q->size == 1)
+		return NULL;
+
+	head = q->d[1];
+	q->d[1] = q->d[--q->size];
+	percolate_down(q, 1);
+
+	return head;
+}
+
+
+void *git_pqueue_peek(git_pqueue *q)
+{
+	if (!q || q->size == 1)
+		return NULL;
+	return q->d[1];
 }

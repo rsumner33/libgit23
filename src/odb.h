@@ -14,7 +14,6 @@
 #include "vector.h"
 #include "cache.h"
 #include "posix.h"
-#include "filter.h"
 
 #define GIT_OBJECTS_DIR "objects/"
 #define GIT_OBJECT_DIR_MODE 0777
@@ -49,7 +48,7 @@ int git_odb__hashobj(git_oid *id, git_rawobj *obj);
 /*
  * Format the object header such as it would appear in the on-disk object
  */
-int git_odb__format_object_header(char *hdr, size_t n, git_off_t obj_len, git_otype obj_type);
+int git_odb__format_object_header(char *hdr, size_t n, size_t obj_len, git_otype obj_type);
 /*
  * Hash an open file descriptor.
  * This is a performance call when the contents of a fd need to be hashed,
@@ -67,7 +66,7 @@ int git_odb__hashfd(git_oid *out, git_file fd, size_t size, git_otype type);
  * Acts just like git_odb__hashfd with the addition of filters...
  */
 int git_odb__hashfd_filtered(
-	git_oid *out, git_file fd, size_t len, git_otype type, git_filter_list *fl);
+	git_oid *out, git_file fd, size_t len, git_otype type, git_vector *filters);
 
 /*
  * Hash a `path`, assuming it could be a POSIX symlink: if the path is a

@@ -8,7 +8,6 @@
 #define INCLUDE_path_h__
 
 #include "common.h"
-#include "posix.h"
 #include "buffer.h"
 #include "vector.h"
 
@@ -120,22 +119,6 @@ GIT_INLINE(void) git_path_mkposix(char *path)
 #	define git_path_mkposix(p) /* blank */
 #endif
 
-/**
- * Check if string is a relative path (i.e. starts with "./" or "../")
- */
-GIT_INLINE(int) git_path_is_relative(const char *p)
-{
-	return (p[0] == '.' && (p[1] == '/' || (p[1] == '.' && p[2] == '/')));
-}
-
-/**
- * Check if string is at end of path segment (i.e. looking at '/' or '\0')
- */
-GIT_INLINE(int) git_path_at_end_of_segment(const char *p)
-{
-	return !*p || *p == '/';
-}
-
 extern int git__percent_decode(git_buf *decoded_out, const char *input);
 
 /**
@@ -192,26 +175,17 @@ extern bool git_path_contains(git_buf *dir, const char *item);
  *
  * @param parent Directory path that might contain subdir
  * @param subdir Subdirectory name to look for in parent
+ * @param append_if_exists If true, then subdir will be appended to the parent path if it does exist
  * @return true if subdirectory exists, false otherwise.
  */
 extern bool git_path_contains_dir(git_buf *parent, const char *subdir);
-
-/**
- * Make the path relative to the given parent path.
- *
- * @param path The path to make relative
- * @param parent The parent path to make path relative to
- * @return 0 if path was made relative, GIT_ENOTFOUND
- *         if there was not common root between the paths,
- *         or <0.
- */
-extern int git_path_make_relative(git_buf *path, const char *parent);
 
 /**
  * Check if the given path contains the given file.
  *
  * @param dir Directory path that might contain file
  * @param file File name to look for in parent
+ * @param append_if_exists If true, then file will be appended to the path if it does exist
  * @return true if file exists, false otherwise.
  */
 extern bool git_path_contains_file(git_buf *dir, const char *file);
@@ -270,30 +244,21 @@ extern int git_path_resolve_relative(git_buf *path, size_t ceiling);
  */
 extern int git_path_apply_relative(git_buf *target, const char *relpath);
 
-enum {
-	GIT_PATH_DIR_IGNORE_CASE = (1u << 0),
-	GIT_PATH_DIR_PRECOMPOSE_UNICODE = (1u << 1),
-	GIT_PATH_DIR_INCLUDE_DOT_AND_DOTDOT = (1u << 2),
-};
-
 /**
  * Walk each directory entry, except '.' and '..', calling fn(state).
  *
- * @param pathbuf Buffer the function reads the initial directory
+ * @param pathbuf buffer the function reads the initial directory
  * 		path from, and updates with each successive entry's name.
- * @param flags Combination of GIT_PATH_DIR flags.
- * @param callback Callback for each entry. Passed the `payload` and each
- *		successive path inside the directory as a full path.  This may
- *		safely append text to the pathbuf if needed.  Return non-zero to
- *		cancel iteration (and return value will be propagated back).
- * @param payload Passed to callback as first argument.
- * @return 0 on success or error code from OS error or from callback
+ * @param fn function to invoke with each entry. The first arg is
+ *		the input state and the second arg is pathbuf. The function
+ *		may modify the pathbuf, but only by appending new text.
+ * @param state to pass to fn as the first arg.
+ * @return 0 on success, GIT_EUSER on non-zero callback, or error code
  */
 extern int git_path_direach(
 	git_buf *pathbuf,
-	uint32_t flags,
-	int (*callback)(void *payload, git_buf *path),
-	void *payload);
+	int (*fn)(void *, git_buf *),
+	void *state);
 
 /**
  * Sort function to order two paths
@@ -308,219 +273,24 @@ extern int git_path_cmp(
  * reached (inclusive of a final call at the root_path).
  *
  * Returning anything other than 0 from the callback function
- * will stop the iteration and propagate the error to the caller.
+ * will stop the iteration and propogate the error to the caller.
  *
  * @param pathbuf Buffer the function reads the directory from and
  *		and updates with each successive name.
  * @param ceiling Prefix of path at which to stop walking up.  If NULL,
- *		this will walk all the way up to the root.  If not a prefix of
- *		pathbuf, the callback will be invoked a single time on the
- *		original input path.
- * @param callback Function to invoke on each path.  Passed the `payload`
- *		and the buffer containing the current path.  The path should not
- *		be modified in any way. Return non-zero to stop iteration.
- * @param payload Passed to fn as the first ath.
+ *      this will walk all the way up to the root.  If not a prefix of
+ *      pathbuf, the callback will be invoked a single time on the
+ *      original input path.
+ * @param fn Function to invoke on each path.  The first arg is the
+ *		input satte and the second arg is the pathbuf.  The function
+ *		should not modify the pathbuf.
+ * @param state Passed to fn as the first ath.
  */
 extern int git_path_walk_up(
 	git_buf *pathbuf,
 	const char *ceiling,
-	int (*callback)(void *payload, const char *path),
-	void *payload);
-
-
-enum { GIT_PATH_NOTEQUAL = 0, GIT_PATH_EQUAL = 1, GIT_PATH_PREFIX = 2 };
-
-/*
- * Determines if a path is equal to or potentially a child of another.
- * @param parent The possible parent
- * @param child The possible child
- */
-GIT_INLINE(int) git_path_equal_or_prefixed(
-	const char *parent,
-	const char *child,
-	ssize_t *prefixlen)
-{
-	const char *p = parent, *c = child;
-	int lastslash = 0;
-
-	while (*p && *c) {
-		lastslash = (*p == '/');
-
-		if (*p++ != *c++)
-			return GIT_PATH_NOTEQUAL;
-	}
-
-	if (*p != '\0')
-		return GIT_PATH_NOTEQUAL;
-
-	if (*c == '\0') {
-		if (prefixlen)
-			*prefixlen = p - parent;
-
-		return GIT_PATH_EQUAL;
-	}
-
-	if (*c == '/' || lastslash) {
-		if (prefixlen)
-			*prefixlen = (p - parent) - lastslash;
-
-		return GIT_PATH_PREFIX;
-	}
-
-	return GIT_PATH_NOTEQUAL;
-}
-
-/* translate errno to libgit2 error code and set error message */
-extern int git_path_set_error(
-	int errno_value, const char *path, const char *action);
-
-/* check if non-ascii characters are present in filename */
-extern bool git_path_has_non_ascii(const char *path, size_t pathlen);
-
-#define GIT_PATH_REPO_ENCODING "UTF-8"
-
-#ifdef __APPLE__
-#define GIT_PATH_NATIVE_ENCODING "UTF-8-MAC"
-#else
-#define GIT_PATH_NATIVE_ENCODING "UTF-8"
-#endif
-
-#ifdef GIT_USE_ICONV
-
-#include <iconv.h>
-
-typedef struct {
-	iconv_t map;
-	git_buf buf;
-} git_path_iconv_t;
-
-#define GIT_PATH_ICONV_INIT { (iconv_t)-1, GIT_BUF_INIT }
-
-/* Init iconv data for converting decomposed UTF-8 to precomposed */
-extern int git_path_iconv_init_precompose(git_path_iconv_t *ic);
-
-/* Clear allocated iconv data */
-extern void git_path_iconv_clear(git_path_iconv_t *ic);
-
-/*
- * Rewrite `in` buffer using iconv map if necessary, replacing `in`
- * pointer internal iconv buffer if rewrite happened.  The `in` pointer
- * will be left unchanged if no rewrite was needed.
- */
-extern int git_path_iconv(git_path_iconv_t *ic, const char **in, size_t *inlen);
-
-#endif /* GIT_USE_ICONV */
-
-extern bool git_path_does_fs_decompose_unicode(const char *root);
-
-
-typedef struct git_path_diriter git_path_diriter;
-
-#if defined(GIT_WIN32) && !defined(__MINGW32__)
-
-struct git_path_diriter
-{
-	git_win32_path path;
-	size_t parent_len;
-
-	git_buf path_utf8;
-	size_t parent_utf8_len;
-
-	HANDLE handle;
-
-	unsigned int flags;
-
-	WIN32_FIND_DATAW current;
-	unsigned int needs_next;
-};
-
-#define GIT_PATH_DIRITER_INIT { {0}, 0, GIT_BUF_INIT, 0, INVALID_HANDLE_VALUE }
-
-#else
-
-struct git_path_diriter
-{
-	git_buf path;
-	size_t parent_len;
-
-	unsigned int flags;
-
-	DIR *dir;
-
-#ifdef GIT_USE_ICONV
-	git_path_iconv_t ic;
-#endif
-};
-
-#define GIT_PATH_DIRITER_INIT { GIT_BUF_INIT }
-
-#endif
-
-/**
- * Initialize a directory iterator.
- *
- * @param diriter Pointer to a diriter structure that will be setup.
- * @param path The path that will be iterated over
- * @param flags Directory reader flags
- * @return 0 or an error code
- */
-extern int git_path_diriter_init(
-	git_path_diriter *diriter,
-	const char *path,
-	unsigned int flags);
-
-/**
- * Advance the directory iterator.  Will return GIT_ITEROVER when
- * the iteration has completed successfully.
- *
- * @param diriter The directory iterator
- * @return 0, GIT_ITEROVER, or an error code
- */
-extern int git_path_diriter_next(git_path_diriter *diriter);
-
-/**
- * Returns the file name of the current item in the iterator.
- *
- * @param out Pointer to store the path in
- * @param out_len Pointer to store the length of the path in
- * @param diriter The directory iterator
- * @return 0 or an error code
- */
-extern int git_path_diriter_filename(
-	const char **out,
-	size_t *out_len,
-	git_path_diriter *diriter);
-
-/**
- * Returns the full path of the current item in the iterator; that
- * is the current filename plus the path of the directory that the
- * iterator was constructed with.
- *
- * @param out Pointer to store the path in
- * @param out_len Pointer to store the length of the path in
- * @param diriter The directory iterator
- * @return 0 or an error code
- */
-extern int git_path_diriter_fullpath(
-	const char **out,
-	size_t *out_len,
-	git_path_diriter *diriter);
-
-/**
- * Performs an `lstat` on the current item in the iterator.
- *
- * @param out Pointer to store the stat data in
- * @param diriter The directory iterator
- * @return 0 or an error code
- */
-extern int git_path_diriter_stat(struct stat *out, git_path_diriter *diriter);
-
-/**
- * Closes the directory iterator.
- *
- * @param diriter The directory iterator
- */
-extern void git_path_diriter_free(git_path_diriter *diriter);
+	int (*fn)(void *state, git_buf *),
+	void *state);
 
 /**
  * Load all directory entries (except '.' and '..') into a vector.
@@ -530,70 +300,55 @@ extern void git_path_diriter_free(git_path_diriter *diriter);
  * of strings. That vector can then be sorted, iterated, or whatever.
  * Remember to free alloc of the allocated strings when you are done.
  *
- * @param contents Vector to fill with directory entry names.
  * @param path The directory to read from.
  * @param prefix_len When inserting entries, the trailing part of path
  * 		will be prefixed after this length.  I.e. given path "/a/b" and
  * 		prefix_len 3, the entries will look like "b/e1", "b/e2", etc.
- * @param flags Combination of GIT_PATH_DIR flags.
+ * @param alloc_extra Extra bytes to add to each string allocation in
+ * 		case you want to append anything funny.
+ * @param contents Vector to fill with directory entry names.
  */
 extern int git_path_dirload(
-	git_vector *contents,
 	const char *path,
 	size_t prefix_len,
-	uint32_t flags);
+	size_t alloc_extra,
+	git_vector *contents);
 
 
-/* Used for paths to repositories on the filesystem */
-extern bool git_path_is_local_file_url(const char *file_url);
-extern int git_path_from_url_or_path(git_buf *local_path_out, const char *url_or_path);
+typedef struct {
+	struct stat st;
+	size_t      path_len;
+	char        path[GIT_FLEX_ARRAY];
+} git_path_with_stat;
 
-/* Flags to determine path validity in `git_path_isvalid` */
-#define GIT_PATH_REJECT_TRAVERSAL          (1 << 0)
-#define GIT_PATH_REJECT_DOT_GIT            (1 << 1)
-#define GIT_PATH_REJECT_SLASH              (1 << 2)
-#define GIT_PATH_REJECT_BACKSLASH          (1 << 3)
-#define GIT_PATH_REJECT_TRAILING_DOT       (1 << 4)
-#define GIT_PATH_REJECT_TRAILING_SPACE     (1 << 5)
-#define GIT_PATH_REJECT_TRAILING_COLON     (1 << 6)
-#define GIT_PATH_REJECT_DOS_PATHS          (1 << 7)
-#define GIT_PATH_REJECT_NT_CHARS           (1 << 8)
-#define GIT_PATH_REJECT_DOT_GIT_HFS        (1 << 9)
-#define GIT_PATH_REJECT_DOT_GIT_NTFS       (1 << 10)
-
-/* Default path safety for writing files to disk: since we use the
- * Win32 "File Namespace" APIs ("\\?\") we need to protect from
- * paths that the normal Win32 APIs would not write.
- */
-#ifdef GIT_WIN32
-# define GIT_PATH_REJECT_DEFAULTS \
-	GIT_PATH_REJECT_TRAVERSAL | \
-	GIT_PATH_REJECT_BACKSLASH | \
-	GIT_PATH_REJECT_TRAILING_DOT | \
-	GIT_PATH_REJECT_TRAILING_SPACE | \
-	GIT_PATH_REJECT_TRAILING_COLON | \
-	GIT_PATH_REJECT_DOS_PATHS | \
-	GIT_PATH_REJECT_NT_CHARS
-#else
-# define GIT_PATH_REJECT_DEFAULTS GIT_PATH_REJECT_TRAVERSAL
-#endif
-
-/*
- * Determine whether a path is a valid git path or not - this must not contain
- * a '.' or '..' component, or a component that is ".git" (in any case).
- *
- * `repo` is optional.  If specified, it will be used to determine the short
- * path name to reject (if `GIT_PATH_REJECT_DOS_SHORTNAME` is specified),
- * in addition to the default of "git~1".
- */
-extern bool git_path_isvalid(
-	git_repository *repo,
-	const char *path,
-	unsigned int flags);
+extern int git_path_with_stat_cmp(const void *a, const void *b);
+extern int git_path_with_stat_cmp_icase(const void *a, const void *b);
 
 /**
- * Convert any backslashes into slashes
+ * Load all directory entries along with stat info into a vector.
+ *
+ * This adds four things on top of plain `git_path_dirload`:
+ *
+ * 1. Each entry in the vector is a `git_path_with_stat` struct that
+ *    contains both the path and the stat info
+ * 2. The entries will be sorted alphabetically
+ * 3. Entries that are directories will be suffixed with a '/'
+ * 4. Optionally, you can be a start and end prefix and only elements
+ *    after the start and before the end (inclusively) will be stat'ed.
+ *
+ * @param path The directory to read from
+ * @param prefix_len The trailing part of path to prefix to entry paths
+ * @param ignore_case How to sort and compare paths with start/end limits
+ * @param start_stat As optimization, only stat values after this prefix
+ * @param end_stat As optimization, only stat values before this prefix
+ * @param contents Vector to fill with git_path_with_stat structures
  */
-int git_path_normalize_slashes(git_buf *out, const char *path);
+extern int git_path_dirload_with_stat(
+	const char *path,
+	size_t prefix_len,
+	bool ignore_case,
+	const char *start_stat,
+	const char *end_stat,
+	git_vector *contents);
 
 #endif

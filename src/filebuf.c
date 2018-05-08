@@ -4,9 +4,13 @@
  * This file is part of libgit2, distributed under the GNU GPL v2 with
  * a Linking Exception. For full terms see the included COPYING file.
  */
+#include <stdarg.h>
+
 #include "common.h"
 #include "filebuf.h"
 #include "fileops.h"
+
+#define GIT_LOCK_FILE_MODE 0644
 
 static const size_t WRITE_BUFFER_SIZE = (4096 * 2);
 
@@ -40,7 +44,7 @@ static int verify_last_error(git_filebuf *file)
 	}
 }
 
-static int lock_file(git_filebuf *file, int flags, mode_t mode)
+static int lock_file(git_filebuf *file, int flags)
 {
 	if (git_path_exists(file->path_lock) == true) {
 		if (flags & GIT_FILEBUF_FORCE)
@@ -49,26 +53,26 @@ static int lock_file(git_filebuf *file, int flags, mode_t mode)
 			giterr_clear(); /* actual OS error code just confuses */
 			giterr_set(GITERR_OS,
 				"Failed to lock file '%s' for writing", file->path_lock);
-			return GIT_ELOCKED;
+			return -1;
 		}
 	}
 
 	/* create path to the file buffer is required */
 	if (flags & GIT_FILEBUF_FORCE) {
 		/* XXX: Should dirmode here be configurable? Or is 0777 always fine? */
-		file->fd = git_futils_creat_locked_withpath(file->path_lock, 0777, mode);
+		file->fd = git_futils_creat_locked_withpath(file->path_lock, 0777, GIT_LOCK_FILE_MODE);
 	} else {
-		file->fd = git_futils_creat_locked(file->path_lock, mode);
+		file->fd = git_futils_creat_locked(file->path_lock, GIT_LOCK_FILE_MODE);
 	}
 
 	if (file->fd < 0)
-		return file->fd;
+		return -1;
 
 	file->fd_is_open = true;
 
 	if ((flags & GIT_FILEBUF_APPEND) && git_path_exists(file->path_original) == true) {
 		git_file source;
-		char buffer[FILEIO_BUFSIZE];
+		char buffer[2048];
 		ssize_t read_bytes;
 
 		source = p_open(file->path_original, O_RDONLY);
@@ -101,7 +105,7 @@ void git_filebuf_cleanup(git_filebuf *file)
 	if (file->fd_is_open && file->fd >= 0)
 		p_close(file->fd);
 
-	if (file->created_lock && !file->did_rename && file->path_lock && git_path_exists(file->path_lock))
+	if (file->fd_is_open && file->path_lock && git_path_exists(file->path_lock))
 		p_unlink(file->path_lock);
 
 	if (file->compute_digest) {
@@ -191,10 +195,10 @@ static int write_deflate(git_filebuf *file, void *source, size_t len)
 	return 0;
 }
 
-int git_filebuf_open(git_filebuf *file, const char *path, int flags, mode_t mode)
+int git_filebuf_open(git_filebuf *file, const char *path, int flags)
 {
-	int compression, error = -1;
-	size_t path_len, alloc_len;
+	int compression;
+	size_t path_len;
 
 	/* opening an already open buffer is a programming error;
 	 * assert that this never happens instead of returning
@@ -251,14 +255,13 @@ int git_filebuf_open(git_filebuf *file, const char *path, int flags, mode_t mode
 		git_buf tmp_path = GIT_BUF_INIT;
 
 		/* Open the file as temporary for locking */
-		file->fd = git_futils_mktmp(&tmp_path, path, mode);
+		file->fd = git_futils_mktmp(&tmp_path, path);
 
 		if (file->fd < 0) {
 			git_buf_free(&tmp_path);
 			goto cleanup;
 		}
 		file->fd_is_open = true;
-		file->created_lock = true;
 
 		/* No original path */
 		file->path_original = NULL;
@@ -272,25 +275,22 @@ int git_filebuf_open(git_filebuf *file, const char *path, int flags, mode_t mode
 		GITERR_CHECK_ALLOC(file->path_original);
 
 		/* create the locking path by appending ".lock" to the original */
-		GITERR_CHECK_ALLOC_ADD(&alloc_len, path_len, GIT_FILELOCK_EXTLENGTH);
-		file->path_lock = git__malloc(alloc_len);
+		file->path_lock = git__malloc(path_len + GIT_FILELOCK_EXTLENGTH);
 		GITERR_CHECK_ALLOC(file->path_lock);
 
 		memcpy(file->path_lock, file->path_original, path_len);
 		memcpy(file->path_lock + path_len, GIT_FILELOCK_EXTENSION, GIT_FILELOCK_EXTLENGTH);
 
 		/* open the file for locking */
-		if ((error = lock_file(file, flags, mode)) < 0)
+		if (lock_file(file, flags) < 0)
 			goto cleanup;
-
-		file->created_lock = true;
 	}
 
 	return 0;
 
 cleanup:
 	git_filebuf_cleanup(file);
-	return error;
+	return -1;
 }
 
 int git_filebuf_hash(git_oid *oid, git_filebuf *file)
@@ -309,16 +309,16 @@ int git_filebuf_hash(git_oid *oid, git_filebuf *file)
 	return 0;
 }
 
-int git_filebuf_commit_at(git_filebuf *file, const char *path)
+int git_filebuf_commit_at(git_filebuf *file, const char *path, mode_t mode)
 {
 	git__free(file->path_original);
 	file->path_original = git__strdup(path);
 	GITERR_CHECK_ALLOC(file->path_original);
 
-	return git_filebuf_commit(file);
+	return git_filebuf_commit(file, mode);
 }
 
-int git_filebuf_commit(git_filebuf *file)
+int git_filebuf_commit(git_filebuf *file, mode_t mode)
 {
 	/* temporary files cannot be committed */
 	assert(file && file->path_original);
@@ -338,12 +338,17 @@ int git_filebuf_commit(git_filebuf *file)
 
 	file->fd = -1;
 
+	if (p_chmod(file->path_lock, mode)) {
+		giterr_set(GITERR_OS, "Failed to set attributes for file at '%s'", file->path_lock);
+		goto on_error;
+	}
+
+	p_unlink(file->path_original);
+
 	if (p_rename(file->path_lock, file->path_original) < 0) {
 		giterr_set(GITERR_OS, "Failed to rename lockfile to '%s'", file->path_original);
 		goto on_error;
 	}
-
-	file->did_rename = true;
 
 	git_filebuf_cleanup(file);
 	return 0;
@@ -413,8 +418,8 @@ int git_filebuf_reserve(git_filebuf *file, void **buffer, size_t len)
 int git_filebuf_printf(git_filebuf *file, const char *format, ...)
 {
 	va_list arglist;
-	size_t space_left, len, alloclen;
-	int written, res;
+	size_t space_left;
+	int len, res;
 	char *tmp_buffer;
 
 	ENSURE_BUF_OK(file);
@@ -423,16 +428,15 @@ int git_filebuf_printf(git_filebuf *file, const char *format, ...)
 
 	do {
 		va_start(arglist, format);
-		written = p_vsnprintf((char *)file->buffer + file->buf_pos, space_left, format, arglist);
+		len = p_vsnprintf((char *)file->buffer + file->buf_pos, space_left, format, arglist);
 		va_end(arglist);
 
-		if (written < 0) {
+		if (len < 0) {
 			file->last_error = BUFERR_MEM;
 			return -1;
 		}
 
-		len = written;
-		if (len + 1 <= space_left) {
+		if ((size_t)len + 1 <= space_left) {
 			file->buf_pos += len;
 			return 0;
 		}
@@ -442,19 +446,19 @@ int git_filebuf_printf(git_filebuf *file, const char *format, ...)
 
 		space_left = file->buf_size - file->buf_pos;
 
-	} while (len + 1 <= space_left);
+	} while ((size_t)len + 1 <= space_left);
 
-	if (GIT_ADD_SIZET_OVERFLOW(&alloclen, len, 1) ||
-		!(tmp_buffer = git__malloc(alloclen))) {
+	tmp_buffer = git__malloc(len + 1);
+	if (!tmp_buffer) {
 		file->last_error = BUFERR_MEM;
 		return -1;
 	}
 
 	va_start(arglist, format);
-	written = p_vsnprintf(tmp_buffer, len + 1, format, arglist);
+	len = p_vsnprintf(tmp_buffer, len + 1, format, arglist);
 	va_end(arglist);
 
-	if (written < 0) {
+	if (len < 0) {
 		git__free(tmp_buffer);
 		file->last_error = BUFERR_MEM;
 		return -1;

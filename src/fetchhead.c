@@ -74,7 +74,6 @@ static int fetchhead_ref_write(
 {
 	char oid[GIT_OID_HEXSZ + 1];
 	const char *type, *name;
-	int head = 0;
 
 	assert(file && fetchhead_ref);
 
@@ -88,15 +87,10 @@ static int fetchhead_ref_write(
 		GIT_REFS_TAGS_DIR) == 0) {
 		type = "tag ";
 		name = fetchhead_ref->ref_name + strlen(GIT_REFS_TAGS_DIR);
-	} else if (!git__strcmp(fetchhead_ref->ref_name, GIT_HEAD_FILE)) {
-		head = 1;
 	} else {
 		type = "";
 		name = fetchhead_ref->ref_name;
 	}
-
-	if (head)
-		return git_filebuf_printf(file, "%s\t\t%s\n", oid, fetchhead_ref->remote_url);
 
 	return git_filebuf_printf(file, "%s\t%s\t%s'%s' of %s\n",
 		oid,
@@ -118,7 +112,7 @@ int git_fetchhead_write(git_repository *repo, git_vector *fetchhead_refs)
 	if (git_buf_joinpath(&path, repo->path_repository, GIT_FETCH_HEAD_FILE) < 0)
 		return -1;
 
-	if (git_filebuf_open(&file, path.ptr, GIT_FILEBUF_FORCE, GIT_REFS_FILE_MODE) < 0) {
+	if (git_filebuf_open(&file, path.ptr, GIT_FILEBUF_FORCE) < 0) {
 		git_buf_free(&path);
 		return -1;
 	}
@@ -130,7 +124,7 @@ int git_fetchhead_write(git_repository *repo, git_vector *fetchhead_refs)
 	git_vector_foreach(fetchhead_refs, i, fetchhead_ref)
 		fetchhead_ref_write(&file, fetchhead_ref);
 
-	return git_filebuf_commit(&file);
+	return git_filebuf_commit(&file, GIT_REFS_FILE_MODE);
 }
 
 static int fetchhead_ref_parse(
@@ -210,7 +204,7 @@ static int fetchhead_ref_parse(
 			name = desc + 1;
 
 		if (name) {
-			if ((desc = strstr(name, "' ")) == NULL ||
+			if ((desc = strchr(name, '\'')) == NULL ||
 				git__prefixcmp(desc, "' of ") != 0) {
 				giterr_set(GITERR_FETCHHEAD,
 					"Invalid description in FETCH_HEAD line %d", line_num);
@@ -260,8 +254,8 @@ int git_repository_fetchhead_foreach(git_repository *repo,
 	while ((line = git__strsep(&buffer, "\n")) != NULL) {
 		++line_num;
 
-		if ((error = fetchhead_ref_parse(
-				&oid, &is_merge, &name, &remote_url, line, line_num)) < 0)
+		if ((error = fetchhead_ref_parse(&oid, &is_merge, &name, &remote_url,
+			line, line_num)) < 0)
 			goto done;
 
 		if (git_buf_len(&name) > 0)
@@ -269,9 +263,8 @@ int git_repository_fetchhead_foreach(git_repository *repo,
 		else
 			ref_name = NULL;
 
-		error = cb(ref_name, remote_url, &oid, is_merge, payload);
-		if (error) {
-			giterr_set_after_callback(error);
+		if ((cb(ref_name, remote_url, &oid, is_merge, payload)) != 0) {
+			error = GIT_EUSER;
 			goto done;
 		}
 	}

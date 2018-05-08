@@ -16,55 +16,50 @@
 #include "pack.h"
 #include "fetch.h"
 #include "netops.h"
-#include "repository.h"
-#include "refs.h"
 
-static int maybe_want(git_remote *remote, git_remote_head *head, git_odb *odb, git_refspec *tagspec, git_remote_autotag_option_t tagopt)
+struct filter_payload {
+	git_remote *remote;
+	const git_refspec *spec, *tagspec;
+	git_odb *odb;
+	int found_head;
+};
+
+static int filter_ref__cb(git_remote_head *head, void *payload)
 {
+	struct filter_payload *p = payload;
 	int match = 0;
 
 	if (!git_reference_is_valid_name(head->name))
 		return 0;
 
-	if (tagopt == GIT_REMOTE_DOWNLOAD_TAGS_ALL) {
-		/*
-		 * If tagopt is --tags, always request tags
-		 * in addition to the remote's refspecs
-		 */
-		if (git_refspec_src_matches(tagspec, head->name))
+	if (!p->found_head && strcmp(head->name, GIT_HEAD_FILE) == 0)
+		p->found_head = 1;
+	else if (git_remote__matching_refspec(p->remote, head->name))
 			match = 1;
-	}
-
-	if (!match && git_remote__matching_refspec(remote, head->name))
-		match = 1;
+	else if (p->remote->download_tags == GIT_REMOTE_DOWNLOAD_TAGS_ALL &&
+		 git_refspec_src_matches(p->tagspec, head->name))
+			match = 1;
 
 	if (!match)
 		return 0;
 
 	/* If we have the object, mark it so we don't ask for it */
-	if (git_odb_exists(odb, &head->oid)) {
+	if (git_odb_exists(p->odb, &head->oid))
 		head->local = 1;
-	}
 	else
-		remote->need_pack = 1;
+		p->remote->need_pack = 1;
 
-	return git_vector_insert(&remote->refs, head);
+	return git_vector_insert(&p->remote->refs, head);
 }
 
-static int filter_wants(git_remote *remote, const git_fetch_options *opts)
+static int filter_wants(git_remote *remote)
 {
-	git_remote_head **heads;
-	git_refspec tagspec, head;
-	int error = 0;
-	git_odb *odb;
-	size_t i, heads_len;
-	git_remote_autotag_option_t tagopt = remote->download_tags;
-
-	if (opts && opts->download_tags != GIT_REMOTE_DOWNLOAD_TAGS_UNSPECIFIED)
-		tagopt = opts->download_tags;
+	struct filter_payload p;
+	git_refspec tagspec;
+	int error = -1;
 
 	git_vector_clear(&remote->refs);
-	if ((error = git_refspec__parse(&tagspec, GIT_REFSPEC_TAGS, true)) < 0)
+	if (git_refspec__parse(&tagspec, GIT_REFSPEC_TAGS, true) < 0)
 		return error;
 
 	/*
@@ -73,27 +68,14 @@ static int filter_wants(git_remote *remote, const git_fetch_options *opts)
 	 * not interested in any particular branch but just the remote's
 	 * HEAD, which will be stored in FETCH_HEAD after the fetch.
 	 */
-	if (remote->active_refspecs.length == 0) {
-		if ((error = git_refspec__parse(&head, "HEAD", true)) < 0)
-			goto cleanup;
+	p.tagspec = &tagspec;
+	p.found_head = 0;
+	p.remote = remote;
 
-		error = git_refspec__dwim_one(&remote->active_refspecs, &head, &remote->refs);
-		git_refspec__free(&head);
-
-		if (error < 0)
-			goto cleanup;
-	}
-
-	if (git_repository_odb__weakptr(&odb, remote->repo) < 0)
+	if (git_repository_odb__weakptr(&p.odb, remote->repo) < 0)
 		goto cleanup;
 
-	if (git_remote_ls((const git_remote_head ***)&heads, &heads_len, remote) < 0)
-		goto cleanup;
-
-	for (i = 0; i < heads_len; i++) {
-		if ((error = maybe_want(remote, heads[i], odb, &tagspec, tagopt)) < 0)
-			break;
-	}
+	error = git_remote_ls(remote, filter_ref__cb, &p);
 
 cleanup:
 	git_refspec__free(&tagspec);
@@ -106,19 +88,17 @@ cleanup:
  * them out. When we get an ACK we hide that commit and continue
  * traversing until we're done
  */
-int git_fetch_negotiate(git_remote *remote, const git_fetch_options *opts)
+int git_fetch_negotiate(git_remote *remote)
 {
 	git_transport *t = remote->transport;
-
-	remote->need_pack = 0;
-
-	if (filter_wants(remote, opts) < 0) {
+	
+	if (filter_wants(remote) < 0) {
 		giterr_set(GITERR_NET, "Failed to filter the reference list for wants");
 		return -1;
 	}
 
 	/* Don't try to negotiate when we don't want anything */
-	if (!remote->need_pack)
+	if (remote->refs.length == 0 || !remote->need_pack)
 		return 0;
 
 	/*
@@ -131,26 +111,15 @@ int git_fetch_negotiate(git_remote *remote, const git_fetch_options *opts)
 		remote->refs.length);
 }
 
-int git_fetch_download_pack(git_remote *remote, const git_remote_callbacks *callbacks)
+int git_fetch_download_pack(
+	git_remote *remote,
+	git_transfer_progress_callback progress_cb,
+	void *progress_payload)
 {
 	git_transport *t = remote->transport;
-	git_transfer_progress_cb progress = NULL;
-	void *payload = NULL;
 
-	if (!remote->need_pack)
+	if(!remote->need_pack)
 		return 0;
 
-	if (callbacks) {
-		progress = callbacks->transfer_progress;
-		payload  = callbacks->payload;
-	}
-
-	return t->download_pack(t, remote->repo, &remote->stats, progress, payload);
-}
-
-int git_fetch_init_options(git_fetch_options *opts, unsigned int version)
-{
-	GIT_INIT_STRUCTURE_FROM_TEMPLATE(
-		opts, version, git_fetch_options, GIT_FETCH_OPTIONS_INIT);
-	return 0;
+	return t->download_pack(t, remote->repo, &remote->stats, progress_cb, progress_payload);
 }

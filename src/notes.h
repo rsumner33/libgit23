@@ -21,10 +21,7 @@
 	"Notes removed by 'git_note_remove' from libgit2"
 
 struct git_note {
-	git_oid id;
-
-	git_signature *author;
-	git_signature *committer;
+	git_oid oid;
 
 	char *message;
 };

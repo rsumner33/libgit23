@@ -4,6 +4,8 @@
  * This file is part of libgit2, distributed under the GNU GPL v2 with
  * a Linking Exception. For full terms see the included COPYING file.
  */
+#include <stdarg.h>
+
 #include "git2/object.h"
 
 #include "common.h"
@@ -115,15 +117,13 @@ int git_object_lookup_prefix(
 {
 	git_object *object = NULL;
 	git_odb *odb = NULL;
-	git_odb_object *odb_obj = NULL;
+	git_odb_object *odb_obj;
 	int error = 0;
 
 	assert(repo && object_out && id);
 
-	if (len < GIT_OID_MINPREFIXLEN) {
-		giterr_set(GITERR_OBJECT, "Ambiguous lookup - OID prefix is too short");
+	if (len < GIT_OID_MINPREFIXLEN)
 		return GIT_EAMBIGUOUS;
-	}
 
 	error = git_repository_odb__weakptr(&odb, repo);
 	if (error < 0)
@@ -277,8 +277,10 @@ static int dereference_object(git_object **dereferenced, git_object *obj)
 		return git_tag_target(dereferenced, (git_tag*)obj);
 
 	case GIT_OBJ_BLOB:
+		return GIT_ENOTFOUND;
+
 	case GIT_OBJ_TREE:
-		return GIT_EPEEL;
+		return GIT_EAMBIGUOUS;
 
 	default:
 		return GIT_EINVALIDSPEC;
@@ -301,32 +303,6 @@ static int peel_error(int error, const git_oid *oid, git_otype type)
 	return error;
 }
 
-static int check_type_combination(git_otype type, git_otype target)
-{
-	if (type == target)
-		return 0;
-
-	switch (type) {
-	case GIT_OBJ_BLOB:
-	case GIT_OBJ_TREE:
-		/* a blob or tree can never be peeled to anything but themselves */
-		return GIT_EINVALIDSPEC;
-		break;
-	case GIT_OBJ_COMMIT:
-		/* a commit can only be peeled to a tree */
-		if (target != GIT_OBJ_TREE && target != GIT_OBJ_ANY)
-			return GIT_EINVALIDSPEC;
-		break;
-	case GIT_OBJ_TAG:
-		/* a tag may point to anything, so we let anything through */
-		break;
-	default:
-		return GIT_EINVALIDSPEC;
-	}
-
-	return 0;
-}
-
 int git_object_peel(
 	git_object **peeled,
 	const git_object *object,
@@ -335,16 +311,14 @@ int git_object_peel(
 	git_object *source, *deref = NULL;
 	int error;
 
+	if (target_type != GIT_OBJ_TAG && 
+		target_type != GIT_OBJ_COMMIT && 
+		target_type != GIT_OBJ_TREE && 
+		target_type != GIT_OBJ_BLOB && 
+		target_type != GIT_OBJ_ANY)
+			return GIT_EINVALIDSPEC;
+
 	assert(object && peeled);
-
-	assert(target_type == GIT_OBJ_TAG ||
-		target_type == GIT_OBJ_COMMIT ||
-		target_type == GIT_OBJ_TREE ||
-		target_type == GIT_OBJ_BLOB ||
-		target_type == GIT_OBJ_ANY);
-
-	if ((error = check_type_combination(git_object_type(object), target_type)) < 0)
-		return peel_error(error, git_object_id(object), target_type);
 
 	if (git_object_type(object) == target_type)
 		return git_object_dup(peeled, (git_object *)object);
@@ -389,81 +363,3 @@ int git_object_dup(git_object **dest, git_object *source)
 	*dest = source;
 	return 0;
 }
-
-int git_object_lookup_bypath(
-		git_object **out,
-		const git_object *treeish,
-		const char *path,
-		git_otype type)
-{
-	int error = -1;
-	git_tree *tree = NULL;
-	git_tree_entry *entry = NULL;
-
-	assert(out && treeish && path);
-
-	if ((error = git_object_peel((git_object**)&tree, treeish, GIT_OBJ_TREE)) < 0 ||
-		 (error = git_tree_entry_bypath(&entry, tree, path)) < 0)
-	{
-		goto cleanup;
-	}
-
-	if (type != GIT_OBJ_ANY && git_tree_entry_type(entry) != type)
-	{
-		giterr_set(GITERR_OBJECT,
-				"object at path '%s' is not of the asked-for type %d",
-				path, type);
-		error = GIT_EINVALIDSPEC;
-		goto cleanup;
-	}
-
-	error = git_tree_entry_to_object(out, git_object_owner(treeish), entry);
-
-cleanup:
-	git_tree_entry_free(entry);
-	git_tree_free(tree);
-	return error;
-}
-
-int git_object_short_id(git_buf *out, const git_object *obj)
-{
-	git_repository *repo;
-	int len = GIT_ABBREV_DEFAULT, error;
-	git_oid id = {{0}};
-	git_odb *odb;
-
-	assert(out && obj);
-
-	git_buf_sanitize(out);
-	repo = git_object_owner(obj);
-
-	if ((error = git_repository__cvar(&len, repo, GIT_CVAR_ABBREV)) < 0)
-		return error;
-
-	if ((error = git_repository_odb(&odb, repo)) < 0)
-		return error;
-
-	while (len < GIT_OID_HEXSZ) {
-		/* set up short oid */
-		memcpy(&id.id, &obj->cached.oid.id, (len + 1) / 2);
-		if (len & 1)
-			id.id[len / 2] &= 0xf0;
-
-		error = git_odb_exists_prefix(NULL, odb, &id, len);
-		if (error != GIT_EAMBIGUOUS)
-			break;
-
-		giterr_clear();
-		len++;
-	}
-
-	if (!error && !(error = git_buf_grow(out, len + 1))) {
-		git_oid_tostr(out->ptr, len + 1, &id);
-		out->size = len;
-	}
-
-	git_odb_free(odb);
-
-	return error;
-}
-

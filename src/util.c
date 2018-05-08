@@ -6,25 +6,124 @@
  */
 #include <git2.h>
 #include "common.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <ctype.h>
 #include "posix.h"
-
-#ifdef GIT_WIN32
-# include "win32/buffer.h"
-#endif
+#include "fileops.h"
+#include "cache.h"
 
 #ifdef _MSC_VER
 # include <Shlwapi.h>
 #endif
 
+void git_libgit2_version(int *major, int *minor, int *rev)
+{
+	*major = LIBGIT2_VER_MAJOR;
+	*minor = LIBGIT2_VER_MINOR;
+	*rev = LIBGIT2_VER_REVISION;
+}
+
+int git_libgit2_capabilities()
+{
+	return 0
+#ifdef GIT_THREADS
+		| GIT_CAP_THREADS
+#endif
+#if defined(GIT_SSL) || defined(GIT_WINHTTP)
+		| GIT_CAP_HTTPS
+#endif
+	;
+}
+
+/* Declarations for tuneable settings */
+extern size_t git_mwindow__window_size;
+extern size_t git_mwindow__mapped_limit;
+
+static int config_level_to_futils_dir(int config_level)
+{
+	int val = -1;
+
+	switch (config_level) {
+	case GIT_CONFIG_LEVEL_SYSTEM: val = GIT_FUTILS_DIR_SYSTEM; break;
+	case GIT_CONFIG_LEVEL_XDG:    val = GIT_FUTILS_DIR_XDG; break;
+	case GIT_CONFIG_LEVEL_GLOBAL: val = GIT_FUTILS_DIR_GLOBAL; break;
+	default:
+		giterr_set(
+			GITERR_INVALID, "Invalid config path selector %d", config_level);
+	}
+
+	return val;
+}
+
+int git_libgit2_opts(int key, ...)
+{
+	int error = 0;
+	va_list ap;
+
+	va_start(ap, key);
+
+	switch (key) {
+	case GIT_OPT_SET_MWINDOW_SIZE:
+		git_mwindow__window_size = va_arg(ap, size_t);
+		break;
+
+	case GIT_OPT_GET_MWINDOW_SIZE:
+		*(va_arg(ap, size_t *)) = git_mwindow__window_size;
+		break;
+
+	case GIT_OPT_SET_MWINDOW_MAPPED_LIMIT:
+		git_mwindow__mapped_limit = va_arg(ap, size_t);
+		break;
+
+	case GIT_OPT_GET_MWINDOW_MAPPED_LIMIT:
+		*(va_arg(ap, size_t *)) = git_mwindow__mapped_limit;
+		break;
+
+	case GIT_OPT_GET_SEARCH_PATH:
+		if ((error = config_level_to_futils_dir(va_arg(ap, int))) >= 0) {
+			char *out = va_arg(ap, char *);
+			size_t outlen = va_arg(ap, size_t);
+
+			error = git_futils_dirs_get_str(out, outlen, error);
+		}
+		break;
+
+	case GIT_OPT_SET_SEARCH_PATH:
+		if ((error = config_level_to_futils_dir(va_arg(ap, int))) >= 0)
+			error = git_futils_dirs_set(error, va_arg(ap, const char *));
+		break;
+
+	case GIT_OPT_SET_CACHE_OBJECT_LIMIT:
+		{
+			git_otype type = (git_otype)va_arg(ap, int);
+			size_t size = va_arg(ap, size_t);
+			error = git_cache_set_max_object_size(type, size);
+			break;
+		}
+
+	case GIT_OPT_SET_CACHE_MAX_SIZE:
+		git_cache__max_storage = va_arg(ap, ssize_t);
+		break;
+
+	case GIT_OPT_ENABLE_CACHING:
+		git_cache__enabled = (va_arg(ap, int) != 0);
+		break;
+
+	case GIT_OPT_GET_CACHED_MEMORY:
+		*(va_arg(ap, ssize_t *)) = git_cache__current_storage.val;
+		*(va_arg(ap, ssize_t *)) = git_cache__max_storage;
+		break;
+	}
+
+	va_end(ap);
+
+	return error;
+}
+
 void git_strarray_free(git_strarray *array)
 {
 	size_t i;
-
-	if (array == NULL)
-		return;
-
 	for (i = 0; i < array->count; ++i)
 		git__free(array->strings[i]);
 
@@ -175,31 +274,9 @@ int git__strcmp(const char *a, const char *b)
 
 int git__strcasecmp(const char *a, const char *b)
 {
-	while (*a && *b && git__tolower(*a) == git__tolower(*b))
+	while (*a && *b && tolower(*a) == tolower(*b))
 		++a, ++b;
-	return ((unsigned char)git__tolower(*a) - (unsigned char)git__tolower(*b));
-}
-
-int git__strcasesort_cmp(const char *a, const char *b)
-{
-	int cmp = 0;
-
-	while (*a && *b) {
-		if (*a != *b) {
-			if (git__tolower(*a) != git__tolower(*b))
-				break;
-			/* use case in sort order even if not in equivalence */
-			if (!cmp)
-				cmp = (int)(*(const uint8_t *)a) - (int)(*(const uint8_t *)b);
-		}
-
-		++a, ++b;
-	}
-
-	if (*a || *b)
-		return (unsigned char)git__tolower(*a) - (unsigned char)git__tolower(*b);
-
-	return cmp;
+	return (tolower(*a) - tolower(*b));
 }
 
 int git__strncmp(const char *a, const char *b, size_t sz)
@@ -216,8 +293,8 @@ int git__strncasecmp(const char *a, const char *b, size_t sz)
 	int al, bl;
 
 	do {
-		al = (unsigned char)git__tolower(*a);
-		bl = (unsigned char)git__tolower(*b);
+		al = (unsigned char)tolower(*a);
+		bl = (unsigned char)tolower(*b);
 		++a, ++b;
 	} while (--sz && al && al == bl);
 
@@ -229,7 +306,7 @@ void git__strntolower(char *str, size_t len)
 	size_t i;
 
 	for (i = 0; i < len; ++i) {
-		str[i] = (char)git__tolower(str[i]);
+		str[i] = (char) tolower(str[i]);
 	}
 }
 
@@ -252,21 +329,6 @@ int git__prefixcmp(const char *str, const char *prefix)
 int git__prefixcmp_icase(const char *str, const char *prefix)
 {
 	return strncasecmp(str, prefix, strlen(prefix));
-}
-
-int git__prefixncmp_icase(const char *str, size_t str_n, const char *prefix)
-{
-	int s, p;
-
-	while(str_n--) {
-		s = (unsigned char)git__tolower(*str++);
-		p = (unsigned char)git__tolower(*prefix++);
-
-		if (s != p)
-			return s - p;
-	}
-
-	return (0 - *prefix);
 }
 
 int git__suffixcmp(const char *str, const char *suffix)
@@ -561,12 +623,10 @@ int git__bsearch_r(
  */
 int git__strcmp_cb(const void *a, const void *b)
 {
-	return strcmp((const char *)a, (const char *)b);
-}
+	const char *stra = (const char *)a;
+	const char *strb = (const char *)b;
 
-int git__strcasecmp_cb(const void *a, const void *b)
-{
-	return strcasecmp((const char *)a, (const char *)b);
+	return strcmp(stra, strb);
 }
 
 int git__parse_bool(int *out, const char *value)
@@ -593,9 +653,6 @@ int git__parse_bool(int *out, const char *value)
 size_t git__unescape(char *str)
 {
 	char *scan, *pos = str;
-
-	if (!str)
-		return 0;
 
 	for (scan = str; *scan; pos++, scan++) {
 		if (*scan == '\\' && *(scan + 1) != '\0')
@@ -628,12 +685,7 @@ static int GIT_STDLIB_CALL git__qsort_r_glue_cmp(
 void git__qsort_r(
 	void *els, size_t nel, size_t elsize, git__sort_r_cmp cmp, void *payload)
 {
-#if defined(__MINGW32__) || defined(AMIGA) || \
-	defined(__OpenBSD__) || defined(__NetBSD__) || \
-	defined(__gnu_hurd__) || defined(__ANDROID_API__) || \
-	defined(__sun) || defined(__CYGWIN__) || \
-	(__GLIBC__ == 2 && __GLIBC_MINOR__ < 8) || \
-	(defined(_MSC_VER) && _MSC_VER < 1500)
+#if defined(__MINGW32__) || defined(__OpenBSD__)
 	git__insertsort_r(els, nel, elsize, NULL, cmp, payload);
 #elif defined(GIT_WIN32)
 	git__qsort_r_glue glue = { cmp, payload };
@@ -668,148 +720,3 @@ void git__insertsort_r(
 	if (freeswap)
 		git__free(swapel);
 }
-
-/*
- * git__utf8_iterate is taken from the utf8proc project,
- * http://www.public-software-group.org/utf8proc
- *
- * Copyright (c) 2009 Public Software Group e. V., Berlin, Germany
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the ""Software""),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
-
-static const int8_t utf8proc_utf8class[256] = {
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-	2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-	3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-	4, 4, 4, 4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0
-};
-
-int git__utf8_charlen(const uint8_t *str, int str_len)
-{
-	int length, i;
-
-	length = utf8proc_utf8class[str[0]];
-	if (!length)
-		return -1;
-
-	if (str_len >= 0 && length > str_len)
-		return -str_len;
-
-	for (i = 1; i < length; i++) {
-		if ((str[i] & 0xC0) != 0x80)
-			return -i;
-	}
-
-	return length;
-}
-
-int git__utf8_iterate(const uint8_t *str, int str_len, int32_t *dst)
-{
-	int length;
-	int32_t uc = -1;
-
-	*dst = -1;
-	length = git__utf8_charlen(str, str_len);
-	if (length < 0)
-		return -1;
-
-	switch (length) {
-		case 1:
-			uc = str[0];
-			break;
-		case 2:
-			uc = ((str[0] & 0x1F) <<  6) + (str[1] & 0x3F);
-			if (uc < 0x80) uc = -1;
-			break;
-		case 3:
-			uc = ((str[0] & 0x0F) << 12) + ((str[1] & 0x3F) <<  6)
-				+ (str[2] & 0x3F);
-			if (uc < 0x800 || (uc >= 0xD800 && uc < 0xE000) ||
-					(uc >= 0xFDD0 && uc < 0xFDF0)) uc = -1;
-			break;
-		case 4:
-			uc = ((str[0] & 0x07) << 18) + ((str[1] & 0x3F) << 12)
-				+ ((str[2] & 0x3F) <<  6) + (str[3] & 0x3F);
-			if (uc < 0x10000 || uc >= 0x110000) uc = -1;
-			break;
-	}
-
-	if (uc < 0 || ((uc & 0xFFFF) >= 0xFFFE))
-		return -1;
-
-	*dst = uc;
-	return length;
-}
-
-#ifdef GIT_WIN32
-int git__getenv(git_buf *out, const char *name)
-{
-	wchar_t *wide_name = NULL, *wide_value = NULL;
-	DWORD value_len;
-	int error = -1;
-
-	git_buf_clear(out);
-
-	if (git__utf8_to_16_alloc(&wide_name, name) < 0)
-		return -1;
-
-	if ((value_len = GetEnvironmentVariableW(wide_name, NULL, 0)) > 0) {
-		wide_value = git__malloc(value_len * sizeof(wchar_t));
-		GITERR_CHECK_ALLOC(wide_value);
-
-		value_len = GetEnvironmentVariableW(wide_name, wide_value, value_len);
-	}
-
-	if (value_len)
-		error = git_buf_put_w(out, wide_value, value_len);
-	else if (GetLastError() == ERROR_ENVVAR_NOT_FOUND)
-		error = GIT_ENOTFOUND;
-	else
-		giterr_set(GITERR_OS, "could not read environment variable '%s'", name);
-
-	git__free(wide_name);
-	git__free(wide_value);
-	return error;
-}
-#else
-int git__getenv(git_buf *out, const char *name)
-{
-	const char *val = getenv(name);
-
-	git_buf_clear(out);
-
-	if (!val)
-		return GIT_ENOTFOUND;
-
-	return git_buf_puts(out, val);
-}
-#endif

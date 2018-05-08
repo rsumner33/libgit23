@@ -9,29 +9,6 @@
 
 #include "git2/oid.h"
 
-/**
- * Format a git_oid into a newly allocated c-string.
- *
- * The c-string is owned by the caller and needs to be manually freed.
- *
- * @param id the oid structure to format
- * @return the c-string; NULL if memory is exhausted. Caller must
- *			deallocate the string with git__free().
- */
-char *git_oid_allocfmt(const git_oid *id);
-
-GIT_INLINE(int) git_oid__hashcmp(const unsigned char *sha1, const unsigned char *sha2)
-{
-	int i;
-
-	for (i = 0; i < GIT_OID_RAWSZ; i++, sha1++, sha2++) {
-		if (*sha1 != *sha2)
-			return *sha1 - *sha2;
-	}
-
-	return 0;
-}
-
 /*
  * Compare two oid structures.
  *
@@ -41,7 +18,16 @@ GIT_INLINE(int) git_oid__hashcmp(const unsigned char *sha1, const unsigned char 
  */
 GIT_INLINE(int) git_oid__cmp(const git_oid *a, const git_oid *b)
 {
-	return git_oid__hashcmp(a->id, b->id);
+	const unsigned char *sha1 = a->id;
+	const unsigned char *sha2 = b->id;
+	int i;
+
+	for (i = 0; i < GIT_OID_RAWSZ; i++, sha1++, sha2++) {
+		if (*sha1 != *sha2)
+			return *sha1 - *sha2;
+	}
+
+	return 0;
 }
 
 #endif

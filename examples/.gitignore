@@ -2,14 +2,4 @@ general
 showindex
 diff
 rev-list
-blame
-cat-file
-init
-log
-rev-parse
-remote
-status
-tag
-for-each-ref
-describe
 *.dSYM

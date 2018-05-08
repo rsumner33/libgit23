@@ -11,10 +11,10 @@
 #include "pool.h"
 #include "odb.h"
 
-int git_commit_list_time_cmp(const void *a, const void *b)
+int git_commit_list_time_cmp(void *a, void *b)
 {
-	const git_commit_list_node *commit_a = a;
-	const git_commit_list_node *commit_b = b;
+	git_commit_list_node *commit_a = (git_commit_list_node *)a;
+	git_commit_list_node *commit_b = (git_commit_list_node *)b;
 
 	return (commit_a->time < commit_b->time);
 }
@@ -36,7 +36,7 @@ git_commit_list *git_commit_list_insert_by_date(git_commit_list_node *item, git_
 	git_commit_list *p;
 
 	while ((p = *pp) != NULL) {
-		if (git_commit_list_time_cmp(p->item, item) > 0)
+		if (git_commit_list_time_cmp(p->item, item) < 0)
 			break;
 
 		pp = &p->next;
@@ -151,7 +151,7 @@ static int commit_quick_parse(
 	while (buffer > committer_start && git__isspace(*buffer))
 		buffer--;
 
-	/* Seek for the beginning of the pack of digits */
+	/* Seek for the begining of the pack of digits */
 	while (buffer > committer_start && git__isdigit(*buffer))
 		buffer--;
 

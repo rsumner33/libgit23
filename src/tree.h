@@ -11,9 +11,9 @@
 #include "repository.h"
 #include "odb.h"
 #include "vector.h"
-#include "strmap.h"
 
 struct git_tree_entry {
+	uint16_t removed;
 	uint16_t attr;
 	git_oid oid;
 	size_t filename_len;
@@ -26,8 +26,8 @@ struct git_tree {
 };
 
 struct git_treebuilder {
-	git_repository *repo;
-	git_strmap *map;
+	git_vector entries;
+	size_t entrycount; /* vector may contain "removed" entries */
 };
 
 GIT_INLINE(bool) git_tree_entry__is_tree(const struct git_tree_entry *e)
@@ -47,7 +47,7 @@ int git_tree__parse(void *tree, git_odb_object *obj);
  * @param prefix the beginning of a path to find in the tree.
  * @return index of the first item at or after the given prefix.
  */
-int git_tree__prefix_position(const git_tree *tree, const char *prefix);
+int git_tree__prefix_position(git_tree *tree, const char *prefix);
 
 
 /**

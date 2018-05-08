@@ -67,17 +67,10 @@
 #include "regex_internal.h"
 
 #include "regex_internal.c"
-
 #ifdef GAWK
-# define bool int
-
-# ifndef true
-#  define true (1)
-# endif
-
-# ifndef false
-#  define false (0)
-# endif
+#define bool int
+#define true (1)
+#define false (0)
 #endif
 #include "regcomp.c"
 #include "regexec.c"

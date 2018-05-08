@@ -14,6 +14,60 @@
 
 #include "git2.h"
 
+static int disambiguate_refname(git_reference **out, git_repository *repo, const char *refname)
+{
+	int error = 0, i;
+	bool fallbackmode = true;
+	git_reference *ref;
+	git_buf refnamebuf = GIT_BUF_INIT, name = GIT_BUF_INIT;
+
+	static const char* formatters[] = {
+		"%s",
+		GIT_REFS_DIR "%s",
+		GIT_REFS_TAGS_DIR "%s",
+		GIT_REFS_HEADS_DIR "%s",
+		GIT_REFS_REMOTES_DIR "%s",
+		GIT_REFS_REMOTES_DIR "%s/" GIT_HEAD_FILE,
+		NULL
+	};
+
+	if (*refname)
+		git_buf_puts(&name, refname);
+	else {
+		git_buf_puts(&name, GIT_HEAD_FILE);
+		fallbackmode = false;
+	}
+
+	for (i = 0; formatters[i] && (fallbackmode || i == 0); i++) {
+
+		git_buf_clear(&refnamebuf);
+
+		if ((error = git_buf_printf(&refnamebuf, formatters[i], git_buf_cstr(&name))) < 0)
+			goto cleanup;
+
+		if (!git_reference_is_valid_name(git_buf_cstr(&refnamebuf))) {
+			error = GIT_EINVALIDSPEC;
+			continue;
+		}
+
+		error = git_reference_lookup_resolved(&ref, repo, git_buf_cstr(&refnamebuf), -1);
+
+		if (!error) {
+			*out = ref;
+			error = 0;
+			goto cleanup;
+		}
+
+		if (error != GIT_ENOTFOUND)
+			goto cleanup;
+	}
+
+cleanup:
+	git_buf_free(&name);
+	git_buf_free(&refnamebuf);
+	return error;
+}
+
 static int maybe_sha_or_abbrev(git_object** out, git_repository *repo, const char *spec, size_t speclen)
 {
 	git_oid oid;
@@ -84,41 +138,43 @@ static int maybe_describe(git_object**out, git_repository *repo, const char *spe
 	return maybe_abbrev(out, repo, substr+2);
 }
 
-static int revparse_lookup_object(
-	git_object **object_out,
-	git_reference **reference_out,
-	git_repository *repo,
-	const char *spec)
+static int revparse_lookup_object(git_object **out, git_repository *repo, const char *spec)
 {
 	int error;
 	git_reference *ref;
 
-	if ((error = maybe_sha(object_out, repo, spec)) != GIT_ENOTFOUND)
+	error = maybe_sha(out, repo, spec);
+	if (!error)
+		return 0;
+
+	if (error < 0 && error != GIT_ENOTFOUND)
 		return error;
 
-	error = git_reference_dwim(&ref, repo, spec);
+	error = disambiguate_refname(&ref, repo, spec);
 	if (!error) {
-
-		error = git_object_lookup(
-			object_out, repo, git_reference_target(ref), GIT_OBJ_ANY);
-
-		if (!error)
-			*reference_out = ref;
-
+		error = git_object_lookup(out, repo, git_reference_target(ref), GIT_OBJ_ANY);
+		git_reference_free(ref);
 		return error;
 	}
 
-	if (error != GIT_ENOTFOUND)
+	if (error < 0 && error != GIT_ENOTFOUND)
 		return error;
 
-	if ((strlen(spec) < GIT_OID_HEXSZ) &&
-		((error = maybe_abbrev(object_out, repo, spec)) != GIT_ENOTFOUND))
-			return error;
+	error = maybe_abbrev(out, repo, spec);
+	if (!error)
+		return 0;
 
-	if ((error = maybe_describe(object_out, repo, spec)) != GIT_ENOTFOUND)
+	if (error < 0 && error != GIT_ENOTFOUND)
 		return error;
 
-	giterr_set(GITERR_REFERENCE, "Revspec '%s' not found.", spec);
+	error = maybe_describe(out, repo, spec);
+	if (!error)
+		return 0;
+
+	if (error < 0 && error != GIT_ENOTFOUND)
+		return error;
+
+	giterr_set(GITERR_REFERENCE, "Refspec '%s' not found.", spec);
 	return GIT_ENOTFOUND;
 }
 
@@ -160,7 +216,7 @@ static int retrieve_previously_checked_out_branch_or_revision(git_object **out, 
 	if (git_reference_lookup(&ref, repo, GIT_HEAD_FILE) < 0)
 		goto cleanup;
 
-	if (git_reflog_read(&reflog, repo, GIT_HEAD_FILE) < 0)
+	if (git_reflog_read(&reflog, ref) < 0)
 		goto cleanup;
 
 	numentries  = git_reflog_entrycount(reflog);
@@ -168,8 +224,6 @@ static int retrieve_previously_checked_out_branch_or_revision(git_object **out, 
 	for (i = 0; i < numentries; i++) {
 		entry = git_reflog_entry_byindex(reflog, i);
 		msg = git_reflog_entry_message(entry);
-		if (!msg)
-			continue;
 
 		if (regexec(&preg, msg, 2, regexmatches, 0))
 			continue;
@@ -181,7 +235,7 @@ static int retrieve_previously_checked_out_branch_or_revision(git_object **out, 
 
 		git_buf_put(&buf, msg+regexmatches[1].rm_so, regexmatches[1].rm_eo - regexmatches[1].rm_so);
 
-		if ((error = git_reference_dwim(base_ref, repo, git_buf_cstr(&buf))) == 0)
+		if ((error = disambiguate_refname(base_ref, repo, git_buf_cstr(&buf))) == 0)
 			goto cleanup;
 
 		if (error < 0 && error != GIT_ENOTFOUND)
@@ -205,21 +259,32 @@ cleanup:
 static int retrieve_oid_from_reflog(git_oid *oid, git_reference *ref, size_t identifier)
 {
 	git_reflog *reflog;
+	int error = -1;
 	size_t numentries;
 	const git_reflog_entry *entry;
 	bool search_by_pos = (identifier <= 100000000);
 
-	if (git_reflog_read(&reflog, git_reference_owner(ref), git_reference_name(ref)) < 0)
+	if (git_reflog_read(&reflog, ref) < 0)
 		return -1;
 
 	numentries = git_reflog_entrycount(reflog);
 
 	if (search_by_pos) {
-		if (numentries < identifier + 1)
-			goto notfound;
+		if (numentries < identifier + 1) {
+			giterr_set(
+				GITERR_REFERENCE,
+				"Reflog for '%s' has only "PRIuZ" entries, asked for "PRIuZ,
+				git_reference_name(ref), numentries, identifier);
+
+			error = GIT_ENOTFOUND;
+			goto cleanup;
+		}
 
 		entry = git_reflog_entry_byindex(reflog, identifier);
 		git_oid_cpy(oid, git_reflog_entry_id_new(entry));
+		error = 0;
+		goto cleanup;
+
 	} else {
 		size_t i;
 		git_time commit_time;
@@ -232,24 +297,16 @@ static int retrieve_oid_from_reflog(git_oid *oid, git_reference *ref, size_t ide
 				continue;
 
 			git_oid_cpy(oid, git_reflog_entry_id_new(entry));
-			break;
+			error = 0;
+			goto cleanup;
 		}
 
-		if (i == numentries)
-			goto notfound;
+		error = GIT_ENOTFOUND;
 	}
 
+cleanup:
 	git_reflog_free(reflog);
-	return 0;
-
-notfound:
-	giterr_set(
-		GITERR_REFERENCE,
-		"Reflog for '%s' has only %"PRIuZ" entries, asked for %"PRIuZ,
-		git_reference_name(ref), numentries, identifier);
-
-	git_reflog_free(reflog);
-	return GIT_ENOTFOUND;
+	return error;
 }
 
 static int retrieve_revobject_from_reflog(git_object **out, git_reference **base_ref, git_repository *repo, const char *identifier, size_t position)
@@ -259,7 +316,7 @@ static int retrieve_revobject_from_reflog(git_object **out, git_reference **base
 	int error = -1;
 
 	if (*base_ref == NULL) {
-		if ((error = git_reference_dwim(&ref, repo, identifier)) < 0)
+		if ((error = disambiguate_refname(&ref, repo, identifier)) < 0)
 			return error;
 	} else {
 		ref = *base_ref;
@@ -287,7 +344,7 @@ static int retrieve_remote_tracking_reference(git_reference **base_ref, const ch
 	int error = -1;
 
 	if (*base_ref == NULL) {
-		if ((error = git_reference_dwim(&ref, repo, identifier)) < 0)
+		if ((error = disambiguate_refname(&ref, repo, identifier)) < 0)
 			return error;
 	} else {
 		ref = *base_ref;
@@ -487,7 +544,8 @@ static int handle_grep_syntax(git_object **out, git_repository *repo, const git_
 	git_revwalk_sorting(walk, GIT_SORT_TIME);
 
 	if (spec_oid == NULL) {
-		if ((error = git_revwalk_push_glob(walk, "refs/*")) < 0)
+		// TODO: @carlosmn: The glob should be refs/* but this makes git_revwalk_next() fails
+		if ((error = git_revwalk_push_glob(walk, GIT_REFS_HEADS_DIR "*")) < 0)
 			goto cleanup;
 	} else if ((error = git_revwalk_push(walk, spec_oid)) < 0)
 			goto cleanup;
@@ -613,8 +671,14 @@ static int ensure_base_rev_loaded(git_object **object, git_reference **reference
 	if (*object != NULL)
 		return 0;
 
-	if (*reference != NULL)
-		return object_from_reference(object, *reference);
+	if (*reference != NULL) {
+		if ((error = object_from_reference(object, *reference)) < 0)
+			return error;
+
+		git_reference_free(*reference);
+		*reference = NULL;
+		return 0;
+	}
 
 	if (!allow_empty_identifier && identifier_len == 0)
 		return GIT_EINVALIDSPEC;
@@ -622,7 +686,7 @@ static int ensure_base_rev_loaded(git_object **object, git_reference **reference
 	if (git_buf_put(&identifier, spec, identifier_len) < 0)
 		return -1;
 
-	error = revparse_lookup_object(object, reference, repo, git_buf_cstr(&identifier));
+	error = revparse_lookup_object(object, repo, git_buf_cstr(&identifier));
 	git_buf_free(&identifier);
 
 	return error;
@@ -658,12 +722,7 @@ static int ensure_left_hand_identifier_is_not_known_yet(git_object *object, git_
 	return GIT_EINVALIDSPEC;
 }
 
-int revparse__ext(
-	git_object **object_out,
-	git_reference **reference_out,
-	size_t *identifier_len_out,
-	git_repository *repo,
-	const char *spec)
+int git_revparse_single(git_object **out, git_repository *repo, const char *spec)
 {
 	size_t pos = 0, identifier_len = 0;
 	int error = -1, n;
@@ -672,18 +731,13 @@ int revparse__ext(
 	git_reference *reference = NULL;
 	git_object *base_rev = NULL;
 
-	bool should_return_reference = true;
+	assert(out && repo && spec);
 
-	assert(object_out && reference_out && repo && spec);
-
-	*object_out = NULL;
-	*reference_out = NULL;
+	*out = NULL;
 
 	while (spec[pos]) {
 		switch (spec[pos]) {
 		case '^':
-			should_return_reference = false;
-
 			if ((error = ensure_base_rev_loaded(&base_rev, &reference, spec, identifier_len, repo, false)) < 0)
 				goto cleanup;
 
@@ -716,8 +770,6 @@ int revparse__ext(
 		{
 			git_object *temp_object = NULL;
 
-			should_return_reference = false;
-
 			if ((error = extract_how_many(&n, spec, &pos)) < 0)
 				goto cleanup;
 
@@ -735,8 +787,6 @@ int revparse__ext(
 		case ':':
 		{
 			git_object *temp_object = NULL;
-
-			should_return_reference = false;
 
 			if ((error = extract_path(&buf, spec, &pos)) < 0)
 				goto cleanup;
@@ -802,14 +852,7 @@ int revparse__ext(
 	if ((error = ensure_base_rev_loaded(&base_rev, &reference, spec, identifier_len, repo, false)) < 0)
 		goto cleanup;
 
-	if (!should_return_reference) {
-		git_reference_free(reference);
-		reference = NULL;
-	}
-
-	*object_out = base_rev;
-	*reference_out = reference;
-	*identifier_len_out = identifier_len;
+	*out = base_rev;
 	error = 0;
 
 cleanup:
@@ -819,61 +862,12 @@ cleanup:
 				"Failed to parse revision specifier - Invalid pattern '%s'", spec);
 
 		git_object_free(base_rev);
-		git_reference_free(reference);
 	}
-
+	git_reference_free(reference);
 	git_buf_free(&buf);
 	return error;
 }
 
-int git_revparse_ext(
-	git_object **object_out,
-	git_reference **reference_out,
-	git_repository *repo,
-	const char *spec)
-{
-	int error;
-	size_t identifier_len;
-	git_object *obj = NULL;
-	git_reference *ref = NULL;
-
-	if ((error = revparse__ext(&obj, &ref, &identifier_len, repo, spec)) < 0)
-		goto cleanup;
-
-	*object_out = obj;
-	*reference_out = ref;
-	GIT_UNUSED(identifier_len);
-
-	return 0;
-
-cleanup:
-	git_object_free(obj);
-	git_reference_free(ref);
-	return error;
-}
-
-int git_revparse_single(git_object **out, git_repository *repo, const char *spec)
-{
-	int error;
-	git_object *obj = NULL;
-	git_reference *ref = NULL;
-
-	*out = NULL;
-
-	if ((error = git_revparse_ext(&obj, &ref, repo, spec)) < 0)
-		goto cleanup;
-
-	git_reference_free(ref);
-
-	*out = obj;
-
-	return 0;
-
-cleanup:
-	git_object_free(obj);
-	git_reference_free(ref);
-	return error;
-}
 
 int git_revparse(
 	git_revspec *revspec,
@@ -899,9 +893,13 @@ int git_revparse(
 			rstr++;
 		}
 
-		error = git_revparse_single(&revspec->from, repo, lstr);
-		if (!error)
-			error = git_revparse_single(&revspec->to, repo, rstr);
+		if ((error = git_revparse_single(&revspec->from, repo, lstr)) < 0) {
+			return error;
+		}
+
+		if ((error = git_revparse_single(&revspec->to, repo, rstr)) < 0) {
+			return error;
+		}
 
 		git__free((void*)lstr);
 	} else {
@@ -911,3 +909,4 @@ int git_revparse(
 
 	return error;
 }
+

@@ -10,7 +10,6 @@
 #include "tag.h"
 #include "merge.h"
 #include "diff.h"
-#include "annotated_commit.h"
 #include "git2/reset.h"
 #include "git2/checkout.h"
 #include "git2/merge.h"
@@ -25,14 +24,15 @@ int git_reset_default(
 {
 	git_object *commit = NULL;
 	git_tree *tree = NULL;
-	git_diff *diff = NULL;
+	git_diff_list *diff = NULL;
 	git_diff_options opts = GIT_DIFF_OPTIONS_INIT;
-	size_t i, max_i;
+	size_t i;
+	git_diff_delta *delta;
 	git_index_entry entry;
 	int error;
 	git_index *index = NULL;
 
-	assert(pathspecs != NULL && pathspecs->count > 0);
+	assert(pathspecs != NULL && pathspecs->count > 0); 
 
 	memset(&entry, 0, sizeof(git_index_entry));
 
@@ -58,28 +58,20 @@ int git_reset_default(
 		&diff, repo, tree, index, &opts)) < 0)
 			goto cleanup;
 
-	for (i = 0, max_i = git_diff_num_deltas(diff); i < max_i; ++i) {
-		const git_diff_delta *delta = git_diff_get_delta(diff, i);
+	git_vector_foreach(&diff->deltas, i, delta) {
+		if ((error = git_index_conflict_remove(index, delta->old_file.path)) < 0)
+			goto cleanup;
 
 		assert(delta->status == GIT_DELTA_ADDED ||
 			delta->status == GIT_DELTA_MODIFIED ||
-			delta->status == GIT_DELTA_CONFLICTED ||
 			delta->status == GIT_DELTA_DELETED);
-
-		error = git_index_conflict_remove(index, delta->old_file.path);
-		if (error < 0) {
-			if (delta->status == GIT_DELTA_ADDED && error == GIT_ENOTFOUND)
-				giterr_clear();
-			else
-				goto cleanup;
-		}
 
 		if (delta->status == GIT_DELTA_DELETED) {
 			if ((error = git_index_remove(index, delta->old_file.path, 0)) < 0)
 				goto cleanup;
 		} else {
 			entry.mode = delta->new_file.mode;
-			git_oid_cpy(&entry.id, &delta->new_file.id);
+			git_oid_cpy(&entry.oid, &delta->new_file.oid);
 			entry.path = (char *)delta->new_file.path;
 
 			if ((error = git_index_add(index, &entry)) < 0)
@@ -93,29 +85,23 @@ cleanup:
 	git_object_free(commit);
 	git_tree_free(tree);
 	git_index_free(index);
-	git_diff_free(diff);
+	git_diff_list_free(diff);
 
 	return error;
 }
 
-static int reset(
+int git_reset(
 	git_repository *repo,
 	git_object *target,
-	const char *to,
-	git_reset_t reset_type,
-	const git_checkout_options *checkout_opts)
+	git_reset_t reset_type)
 {
 	git_object *commit = NULL;
 	git_index *index = NULL;
 	git_tree *tree = NULL;
 	int error = 0;
-	git_checkout_options opts = GIT_CHECKOUT_OPTIONS_INIT;
-	git_buf log_message = GIT_BUF_INIT;
+	git_checkout_opts opts = GIT_CHECKOUT_OPTS_INIT;
 
 	assert(repo && target);
-
-	if (checkout_opts)
-		opts = *checkout_opts;
 
 	if (git_object_owner(target) != repo) {
 		giterr_set(GITERR_OBJECT,
@@ -142,12 +128,9 @@ static int reset(
 		goto cleanup;
 	}
 
-	if ((error = git_buf_printf(&log_message, "reset: moving to %s", to)) < 0)
-		return error;
-
 	/* move HEAD to the new target */
 	if ((error = git_reference__update_terminal(repo, GIT_HEAD_FILE,
-		git_object_id(commit), NULL, git_buf_cstr(&log_message))) < 0)
+		git_object_id(commit))) < 0)
 		goto cleanup;
 
 	if (reset_type == GIT_RESET_HARD) {
@@ -165,7 +148,7 @@ static int reset(
 			(error = git_index_write(index)) < 0)
 			goto cleanup;
 
-		if ((error = git_repository_state_cleanup(repo)) < 0) {
+		if ((error = git_repository_merge_cleanup(repo)) < 0) {
 			giterr_set(GITERR_INDEX, "%s - failed to clean up merge data", ERROR_MSG);
 			goto cleanup;
 		}
@@ -175,25 +158,6 @@ cleanup:
 	git_object_free(commit);
 	git_index_free(index);
 	git_tree_free(tree);
-	git_buf_free(&log_message);
 
 	return error;
-}
-
-int git_reset(
-	git_repository *repo,
-	git_object *target,
-	git_reset_t reset_type,
-	const git_checkout_options *checkout_opts)
-{
-	return reset(repo, target, git_oid_tostr_s(git_object_id(target)), reset_type, checkout_opts);
-}
-
-int git_reset_from_annotated(
-	git_repository *repo,
-	git_annotated_commit *commit,
-	git_reset_t reset_type,
-	const git_checkout_options *checkout_opts)
-{
-	return reset(repo, (git_object *) commit->commit, commit->ref_name, reset_type, checkout_opts);
 }

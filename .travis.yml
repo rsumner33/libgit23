@@ -1,11 +1,8 @@
 # Travis-CI Build for libgit2
 # see travis-ci.org for details
 
+# As CMake is not officially supported we use erlang VMs
 language: c
-
-os:
-  - linux
-  - osx
 
 compiler:
   - gcc
@@ -13,63 +10,39 @@ compiler:
 
 # Settings to try
 env:
- global:
-  - secure: "YnhS+8n6B+uoyaYfaJ3Lei7cSJqHDPiKJCKFIF2c87YDfmCvAJke8QtE7IzjYDs7UFkTCM4ox+ph2bERUrxZbSCyEkHdjIZpKuMJfYWja/jgMqTMxdyOH9y8JLFbZsSXDIXDwqBlC6vVyl1fP90M35wuWcNTs6tctfVWVofEFbs="
-  - GITTEST_INVASIVE_FS_SIZE=1
- matrix:
   - OPTIONS="-DTHREADSAFE=ON -DCMAKE_BUILD_TYPE=Release"
-  - OPTIONS="-DTHREADSAFE=OFF -DBUILD_EXAMPLES=ON"
-
-addons:
-  apt:
-    packages:
-    - cmake
-    - libssh2-1-dev
-    - openssh-client
-    - openssh-server
-    - valgrind
-
-sudo: false
+  - OPTIONS="-DBUILD_CLAR=ON -DBUILD_EXAMPLES=ON"
 
 matrix:
- fast_finish: true
- exclude:
-   - os: osx
-     compiler: gcc
  include:
    - compiler: i586-mingw32msvc-gcc
-     env: OPTIONS="-DCMAKE_TOOLCHAIN_FILE=../script/toolchain-mingw32.cmake" SKIP_TESTS=1
-     os: linux
-   - compiler: gcc
-     env: COVERITY=1
-     os: linux
-   - compiler: gcc
-     env:
-       - VALGRIND=1
-         OPTIONS="-DBUILD_CLAR=ON -DBUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=Debug"
-     os: linux
- allow_failures:
-   - env: COVERITY=1
-   - env:
-       - VALGRIND=1
-         OPTIONS="-DBUILD_CLAR=ON -DBUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=Debug"
+     env: OPTIONS="-DBUILD_CLAR=OFF -DWIN32=ON -DMINGW=ON"
 
+# Make sure CMake is installed
 install:
-  - if [ "$TRAVIS_OS_NAME" = "osx" ]; then ./script/install-deps-${TRAVIS_OS_NAME}.sh; fi
+ - sudo apt-get update >/dev/null
+ - sudo apt-get -q install cmake valgrind
 
-# Run the Build script and tests
+# Run the Build script
 script:
- - script/cibuild.sh
+ - mkdir _temp
+ - git init --bare _temp/test.git
+ - git daemon --listen=localhost --export-all --enable=receive-pack --base-path=_temp _temp 2>/dev/null &
+ - export GITTEST_REMOTE_URL="git://localhost/test.git"
+ - mkdir _build
+ - cd _build
+ - cmake .. -DCMAKE_INSTALL_PREFIX=../_install $OPTIONS
+ - cmake --build . --target install
+ - ctest -V .
 
 # Run Tests
 after_success:
- - if [ "$TRAVIS_OS_NAME" = "linux" -a -n "$VALGRIND" ]; then valgrind --leak-check=full --show-reachable=yes --suppressions=./libgit2_clar.supp _build/libgit2_clar -ionline; fi
+ - valgrind --leak-check=full --show-reachable=yes --suppressions=../libgit2_clar.supp ./libgit2_clar -ionline
 
-# Only watch the development and master branches
+# Only watch the development branch
 branches:
  only:
-   - master
-   - /^maint.*/
+   - development
 
 # Notify development list when needed
 notifications:

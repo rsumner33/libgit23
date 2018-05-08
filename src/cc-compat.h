@@ -7,8 +7,6 @@
 #ifndef INCLUDE_compat_h__
 #define INCLUDE_compat_h__
 
-#include <stdarg.h>
-
 /*
  * See if our compiler is known to support flexible array members.
  */
@@ -35,25 +33,15 @@
 #	define GIT_TYPEOF(x)
 #endif
 
-#if defined(__GNUC__)
-#	define GIT_ALIGN(x,size) x __attribute__ ((aligned(size)))
-#elif defined(_MSC_VER)
-#	define GIT_ALIGN(x,size) __declspec(align(size)) x
-#else
-#	define GIT_ALIGN(x,size) x
-#endif
-
 #define GIT_UNUSED(x) ((void)(x))
 
 /* Define the printf format specifer to use for size_t output */
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #	define PRIuZ "Iu"
 #	define PRIxZ "Ix"
-#	define PRIdZ "Id"
 #else
 #	define PRIuZ "zu"
 #	define PRIxZ "zx"
-#	define PRIdZ "zd"
 #endif
 
 /* Micosoft Visual C/C++ */
@@ -66,12 +54,8 @@
 
 #if defined (_MSC_VER)
 	typedef unsigned char bool;
-#	ifndef true
-#		define true 1
-#	endif
-#	ifndef false
-#		define false 0
-#	endif
+#	define true 1
+#	define false 0
 #else
 #	include <stdbool.h>
 #endif

@@ -8,41 +8,47 @@
 #define INCLUDE_posix__w32_h__
 
 #include "common.h"
-#include "../posix.h"
-#include "path_w32.h"
 #include "utf-conv.h"
-#include "dir.h"
 
-typedef SOCKET GIT_SOCKET;
+GIT_INLINE(int) p_link(const char *old, const char *new)
+{
+	GIT_UNUSED(old);
+	GIT_UNUSED(new);
+	errno = ENOSYS;
+	return -1;
+}
 
-#define p_lseek(f,n,w) _lseeki64(f, n, w)
-#define p_fstat(f,b) _fstat64(f, b)
-extern int p_lstat(const char *file_name, struct stat *buf);
-extern int p_stat(const char* path, struct stat* buf);
+GIT_INLINE(int) p_mkdir(const char *path, mode_t mode)
+{
+	wchar_t buf[GIT_WIN_PATH];
+	GIT_UNUSED(mode);
+	git__utf8_to_16(buf, GIT_WIN_PATH, path);
+	return _wmkdir(buf);
+}
 
-extern int p_utimes(const char *filename, const struct timeval times[2]);
-extern int p_futimes(int fd, const struct timeval times[2]);
-
-extern int p_readlink(const char *path, char *buf, size_t bufsiz);
-extern int p_symlink(const char *old, const char *new);
-extern int p_link(const char *old, const char *new);
 extern int p_unlink(const char *path);
-extern int p_mkdir(const char *path, mode_t mode);
-extern int p_fsync(int fd);
+extern int p_lstat(const char *file_name, struct stat *buf);
+extern int p_readlink(const char *link, char *target, size_t target_len);
+extern int p_symlink(const char *old, const char *new);
+extern int p_hide_directory__w32(const char *path);
 extern char *p_realpath(const char *orig_path, char *buffer);
-
-extern int p_recv(GIT_SOCKET socket, void *buffer, size_t length, int flags);
-extern int p_send(GIT_SOCKET socket, const void *buffer, size_t length, int flags);
-extern int p_inet_pton(int af, const char* src, void* dst);
-
 extern int p_vsnprintf(char *buffer, size_t count, const char *format, va_list argptr);
 extern int p_snprintf(char *buffer, size_t count, const char *format, ...) GIT_FORMAT_PRINTF(3, 4);
 extern int p_mkstemp(char *tmp_path);
+extern int p_setenv(const char* name, const char* value, int overwrite);
+extern int p_stat(const char* path, struct stat* buf);
 extern int p_chdir(const char* path);
 extern int p_chmod(const char* path, mode_t mode);
 extern int p_rmdir(const char* path);
 extern int p_access(const char* path, mode_t mode);
-extern int p_ftruncate(int fd, git_off_t size);
+extern int p_fsync(int fd);
+extern int p_open(const char *path, int flags, ...);
+extern int p_creat(const char *path, mode_t mode);
+extern int p_getcwd(char *buffer_out, size_t size);
+extern int p_rename(const char *from, const char *to);
+extern int p_recv(GIT_SOCKET socket, void *buffer, size_t length, int flags);
+extern int p_send(GIT_SOCKET socket, const void *buffer, size_t length, int flags);
+extern int p_inet_pton(int af, const char* src, void* dst);
 
 /* p_lstat is almost but not quite POSIX correct.  Specifically, the use of
  * ENOTDIR is wrong, in that it does not mean precisely that a non-directory
@@ -51,8 +57,5 @@ extern int p_ftruncate(int fd, git_off_t size);
  * POSIX ENOTDIR semantics is required.
  */
 extern int p_lstat_posixly(const char *filename, struct stat *buf);
-
-extern struct tm * p_localtime_r(const time_t *timer, struct tm *result);
-extern struct tm * p_gmtime_r(const time_t *timer, struct tm *result);
 
 #endif

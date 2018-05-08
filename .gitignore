@@ -1,6 +1,6 @@
-/tests/clar.suite
-/tests/clar.suite.rule
-/tests/.clarcache
+/tests-clar/clar.suite
+/tests-clar/clar.suite.rule
+/tests-clar/.clarcache
 /apidocs
 /trash-*.exe
 /libgit2.pc
@@ -28,6 +28,5 @@ msvc/Release/
 !cmake/Modules/*.cmake
 .DS_Store
 *~
-.*.swp
 tags
 mkmf.log

@@ -7,11 +7,6 @@
 #ifndef INCLUDE_git_reset_h__
 #define INCLUDE_git_reset_h__
 
-#include "common.h"
-#include "types.h"
-#include "strarray.h"
-#include "checkout.h"
-
 /**
  * @file git2/reset.h
  * @brief Git reset management routines
@@ -24,9 +19,9 @@ GIT_BEGIN_DECL
  * Kinds of reset operation
  */
 typedef enum {
-	GIT_RESET_SOFT  = 1, /**< Move the head to the given commit */
-	GIT_RESET_MIXED = 2, /**< SOFT plus reset index to the commit */
-	GIT_RESET_HARD  = 3, /**< MIXED plus changes in working tree discarded */
+	GIT_RESET_SOFT  = 1, /** Move the head to the given commit */
+	GIT_RESET_MIXED = 2, /** SOFT plus reset index to the commit */
+	GIT_RESET_HARD  = 3, /** MIXED plus changes in working tree discarded */
 } git_reset_t;
 
 /**
@@ -53,35 +48,10 @@ typedef enum {
  *
  * @param reset_type Kind of reset operation to perform.
  *
- * @param checkout_opts Checkout options to be used for a HARD reset.
- * The checkout_strategy field will be overridden (based on reset_type).
- * This parameter can be used to propagate notify and progress callbacks.
- *
  * @return 0 on success or an error code
  */
 GIT_EXTERN(int) git_reset(
-	git_repository *repo,
-	git_object *target,
-	git_reset_t reset_type,
-	const git_checkout_options *checkout_opts);
-
-/**
- * Sets the current head to the specified commit oid and optionally
- * resets the index and working tree to match.
- *
- * This behaves like `git_reset()` but takes an annotated commit,
- * which lets you specify which extended sha syntax string was
- * specified by a user, allowing for more exact reflog messages.
- *
- * See the documentation for `git_reset()`.
- *
- * @see git_reset
- */
-GIT_EXTERN(int) git_reset_from_annotated(
-	git_repository *repo,
-	git_annotated_commit *commit,
-	git_reset_t reset_type,
-	const git_checkout_options *checkout_opts);
+	git_repository *repo, git_object *target, git_reset_t reset_type);
 
 /**
  * Updates some entries in the index from the target commit tree.
@@ -102,9 +72,9 @@ GIT_EXTERN(int) git_reset_from_annotated(
  * @return 0 on success or an error code < 0
  */
 GIT_EXTERN(int) git_reset_default(
-	git_repository *repo,
-	git_object *target,
-	git_strarray* pathspecs);
+    git_repository *repo,
+    git_object *target,
+    git_strarray* pathspecs);
 
 /** @} */
 GIT_END_DECL

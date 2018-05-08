@@ -24,24 +24,17 @@ GIT_BEGIN_DECL
 /**
  * Lookup a commit object from a repository.
  *
- * The returned object should be released with `git_commit_free` when no
- * longer needed.
- *
  * @param commit pointer to the looked up commit
  * @param repo the repo to use when locating the commit.
  * @param id identity of the commit to locate. If the object is
  *		an annotated tag it will be peeled back to the commit.
  * @return 0 or an error code
  */
-GIT_EXTERN(int) git_commit_lookup(
-	git_commit **commit, git_repository *repo, const git_oid *id);
+GIT_EXTERN(int) git_commit_lookup(git_commit **commit, git_repository *repo, const git_oid *id);
 
 /**
- * Lookup a commit object from a repository, given a prefix of its
- * identifier (short id).
- *
- * The returned object should be released with `git_commit_free` when no
- * longer needed.
+ * Lookup a commit object from a repository,
+ * given a prefix of its identifier (short id).
  *
  * @see git_object_lookup_prefix
  *
@@ -52,8 +45,7 @@ GIT_EXTERN(int) git_commit_lookup(
  * @param len the length of the short identifier
  * @return 0 or an error code
  */
-GIT_EXTERN(int) git_commit_lookup_prefix(
-	git_commit **commit, git_repository *repo, const git_oid *id, size_t len);
+GIT_EXTERN(int) git_commit_lookup_prefix(git_commit **commit, git_repository *repo, const git_oid *id, size_t len);
 
 /**
  * Close an open commit
@@ -78,14 +70,6 @@ GIT_EXTERN(void) git_commit_free(git_commit *commit);
 GIT_EXTERN(const git_oid *) git_commit_id(const git_commit *commit);
 
 /**
- * Get the repository that contains the commit.
- *
- * @param commit A previously loaded commit.
- * @return Repository that contains this commit.
- */
-GIT_EXTERN(git_repository *) git_commit_owner(const git_commit *commit);
-
-/**
  * Get the encoding for the message of a commit,
  * as a string representing a standard encoding name.
  *
@@ -100,32 +84,10 @@ GIT_EXTERN(const char *) git_commit_message_encoding(const git_commit *commit);
 /**
  * Get the full message of a commit.
  *
- * The returned message will be slightly prettified by removing any
- * potential leading newlines.
- *
  * @param commit a previously loaded commit.
  * @return the message of a commit
  */
 GIT_EXTERN(const char *) git_commit_message(const git_commit *commit);
-
-/**
- * Get the full raw message of a commit.
- *
- * @param commit a previously loaded commit.
- * @return the raw message of a commit
- */
-GIT_EXTERN(const char *) git_commit_message_raw(const git_commit *commit);
-
-/**
- * Get the short "summary" of the git commit message.
- *
- * The returned message is the summary of the commit, comprising the
- * first paragraph of the message with whitespace trimmed and squashed.
- *
- * @param commit a previously loaded commit.
- * @return the summary of a commit or NULL on error
- */
-GIT_EXTERN(const char *) git_commit_summary(git_commit *commit);
 
 /**
  * Get the commit time (i.e. committer time) of a commit.
@@ -158,14 +120,6 @@ GIT_EXTERN(const git_signature *) git_commit_committer(const git_commit *commit)
  * @return the author of a commit
  */
 GIT_EXTERN(const git_signature *) git_commit_author(const git_commit *commit);
-
-/**
- * Get the full raw text of the commit header.
- *
- * @param commit a previously loaded commit
- * @return the header text of the commit
- */
-GIT_EXTERN(const char *) git_commit_raw_header(const git_commit *commit);
 
 /**
  * Get the tree pointed to by a commit.
@@ -202,10 +156,7 @@ GIT_EXTERN(unsigned int) git_commit_parentcount(const git_commit *commit);
  * @param n the position of the parent (from 0 to `parentcount`)
  * @return 0 or an error code
  */
-GIT_EXTERN(int) git_commit_parent(
-	git_commit **out,
-	const git_commit *commit,
-	unsigned int n);
+GIT_EXTERN(int) git_commit_parent(git_commit **out, git_commit *commit, unsigned int n);
 
 /**
  * Get the oid of a specified parent for a commit. This is different from
@@ -216,9 +167,7 @@ GIT_EXTERN(int) git_commit_parent(
  * @param n the position of the parent (from 0 to `parentcount`)
  * @return the id of the parent, NULL on error.
  */
-GIT_EXTERN(const git_oid *) git_commit_parent_id(
-	const git_commit *commit,
-	unsigned int n);
+GIT_EXTERN(const git_oid *) git_commit_parent_id(git_commit *commit, unsigned int n);
 
 /**
  * Get the commit object that is the <n>th generation ancestor
@@ -240,21 +189,10 @@ GIT_EXTERN(int) git_commit_nth_gen_ancestor(
 	unsigned int n);
 
 /**
- * Get an arbitrary header field
- *
- * @param out the buffer to fill
- * @param commit the commit to look in
- * @param field the header field to return
- * @return 0 on succeess, GIT_ENOTFOUND if the field does not exist,
- * or an error code
- */
-GIT_EXTERN(int) git_commit_header_field(git_buf *out, const git_commit *commit, const char *field);
-
-/**
  * Create new commit in the repository from a list of `git_object` pointers
  *
- * The message will **not** be cleaned up automatically. You can do that
- * with the `git_message_prettify()` function.
+ * The message will not be cleaned up automatically. You can do that with
+ * the `git_message_prettify()` function.
  *
  * @param id Pointer in which to store the OID of the newly created commit
  *
@@ -265,8 +203,7 @@ GIT_EXTERN(int) git_commit_header_field(git_buf *out, const git_commit *commit, 
  *	is not direct, it will be resolved to a direct reference.
  *	Use "HEAD" to update the HEAD of the current branch and
  *	make it point to this commit. If the reference doesn't
- *	exist yet, it will be created. If it does exist, the first
- *	parent must be the tip of this branch.
+ *	exist yet, it will be created.
  *
  * @param author Signature with author and author time of commit
  *
@@ -285,7 +222,7 @@ GIT_EXTERN(int) git_commit_header_field(git_buf *out, const git_commit *commit, 
  *
  * @param parent_count Number of parents for this commit
  *
- * @param parents Array of `parent_count` pointers to `git_commit`
+ * @param parents[] Array of `parent_count` pointers to `git_commit`
  *  objects that will be used as the parents for this commit. This
  *  array may be NULL if `parent_count` is 0 (root commit). All the
  *  given commits must be owned by the `repo`.
@@ -303,20 +240,20 @@ GIT_EXTERN(int) git_commit_create(
 	const char *message_encoding,
 	const char *message,
 	const git_tree *tree,
-	size_t parent_count,
+	int parent_count,
 	const git_commit *parents[]);
 
 /**
  * Create new commit in the repository using a variable argument list.
  *
- * The message will **not** be cleaned up automatically. You can do that
- * with the `git_message_prettify()` function.
+ * The message will be cleaned up from excess whitespace and it will be made
+ * sure that the last line ends with a '\n'.
  *
  * The parents for the commit are specified as a variable list of pointers
  * to `const git_commit *`. Note that this is a convenience method which may
  * not be safe to export for certain languages or compilers
  *
- * All other parameters remain the same as `git_commit_create()`.
+ * All other parameters remain the same at `git_commit_create()`.
  *
  * @see git_commit_create
  */
@@ -329,39 +266,8 @@ GIT_EXTERN(int) git_commit_create_v(
 	const char *message_encoding,
 	const char *message,
 	const git_tree *tree,
-	size_t parent_count,
+	int parent_count,
 	...);
-
-/**
- * Amend an existing commit by replacing only non-NULL values.
- *
- * This creates a new commit that is exactly the same as the old commit,
- * except that any non-NULL values will be updated.  The new commit has
- * the same parents as the old commit.
- *
- * The `update_ref` value works as in the regular `git_commit_create()`,
- * updating the ref to point to the newly rewritten commit.  If you want
- * to amend a commit that is not currently the tip of the branch and then
- * rewrite the following commits to reach a ref, pass this as NULL and
- * update the rest of the commit chain and ref separately.
- *
- * Unlike `git_commit_create()`, the `author`, `committer`, `message`,
- * `message_encoding`, and `tree` parameters can be NULL in which case this
- * will use the values from the original `commit_to_amend`.
- *
- * All parameters have the same meanings as in `git_commit_create()`.
- *
- * @see git_commit_create
- */
-GIT_EXTERN(int) git_commit_amend(
-	git_oid *id,
-	const git_commit *commit_to_amend,
-	const char *update_ref,
-	const git_signature *author,
-	const git_signature *committer,
-	const char *message_encoding,
-	const char *message,
-	const git_tree *tree);
 
 /** @} */
 GIT_END_DECL

@@ -11,8 +11,7 @@ OBJECTS = \
   ls-remote.o \
   fetch.o \
   clone.o \
-  index-pack.o \
-  common.o
+  index-pack.o
 
 all: $(OBJECTS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o git2 $(OBJECTS) $(LIBRARIES)

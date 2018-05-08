@@ -11,8 +11,6 @@
 #include "map.h"
 #include "posix.h"
 #include "path.h"
-#include "pool.h"
-#include "strmap.h"
 
 /**
  * Filebuffer methods
@@ -23,9 +21,6 @@ extern int git_futils_readbuffer(git_buf *obj, const char *path);
 extern int git_futils_readbuffer_updated(
 	git_buf *obj, const char *path, time_t *mtime, size_t *size, int *updated);
 extern int git_futils_readbuffer_fd(git_buf *obj, git_file fd, size_t len);
-
-extern int git_futils_writebuffer(
-	const git_buf *buf, const char *path, int open_flags, mode_t mode);
 
 /**
  * File utils
@@ -72,8 +67,6 @@ extern int git_futils_mkdir_r(const char *path, const char *base, const mode_t m
  * * GIT_MKDIR_SKIP_LAST says to leave off the last element of the path
  * * GIT_MKDIR_SKIP_LAST2 says to leave off the last 2 elements of the path
  * * GIT_MKDIR_VERIFY_DIR says confirm final item is a dir, not just EEXIST
- * * GIT_MKDIR_REMOVE_FILES says to remove files and recreate dirs
- * * GIT_MKDIR_REMOVE_SYMLINKS says to remove symlinks and recreate dirs
  *
  * Note that the chmod options will be executed even if the directory already
  * exists, unless GIT_MKDIR_EXCL is given.
@@ -86,23 +79,7 @@ typedef enum {
 	GIT_MKDIR_SKIP_LAST = 16,
 	GIT_MKDIR_SKIP_LAST2 = 32,
 	GIT_MKDIR_VERIFY_DIR = 64,
-	GIT_MKDIR_REMOVE_FILES = 128,
-	GIT_MKDIR_REMOVE_SYMLINKS = 256,
 } git_futils_mkdir_flags;
-
-struct git_futils_mkdir_perfdata
-{
-	size_t stat_calls;
-	size_t mkdir_calls;
-	size_t chmod_calls;
-};
-
-struct git_futils_mkdir_options
-{
-	git_strmap *dir_map;
-	git_pool *pool;
-	struct git_futils_mkdir_perfdata perfdata;
-};
 
 /**
  * Create a directory or entire path.
@@ -115,14 +92,7 @@ struct git_futils_mkdir_options
  * @param base Root for relative path.  These directories will never be made.
  * @param mode The mode to use for created directories.
  * @param flags Combination of the mkdir flags above.
- * @param opts Extended options, use `git_futils_mkdir` if you are not interested.
  * @return 0 on success, else error code
- */
-extern int git_futils_mkdir_ext(const char *path, const char *base, mode_t mode, uint32_t flags, struct git_futils_mkdir_options *opts);
-
-/**
- * Create a directory or entire path.  Similar to `git_futils_mkdir_withperf`
- * without performance data.
  */
 extern int git_futils_mkdir(const char *path, const char *base, mode_t mode, uint32_t flags);
 
@@ -142,7 +112,12 @@ extern int git_futils_mkpath2file(const char *path, const mode_t mode);
  * * GIT_RMDIR_EMPTY_PARENTS   - remove containing directories up to base
  *       if removing this item leaves them empty
  * * GIT_RMDIR_REMOVE_BLOCKERS - remove blocking file that causes ENOTDIR
- * * GIT_RMDIR_SKIP_ROOT       - don't remove root directory itself
+ *
+ * The old values translate into the new as follows:
+ *
+ * * GIT_DIRREMOVAL_EMPTY_HIERARCHY == GIT_RMDIR_EMPTY_HIERARCHY
+ * * GIT_DIRREMOVAL_FILES_AND_DIRS  ~= GIT_RMDIR_REMOVE_FILES
+ * * GIT_DIRREMOVAL_ONLY_EMPTY_DIRS == GIT_RMDIR_SKIP_NONEMPTY
  */
 typedef enum {
 	GIT_RMDIR_EMPTY_HIERARCHY = 0,
@@ -150,7 +125,6 @@ typedef enum {
 	GIT_RMDIR_SKIP_NONEMPTY   = (1 << 1),
 	GIT_RMDIR_EMPTY_PARENTS   = (1 << 2),
 	GIT_RMDIR_REMOVE_BLOCKERS = (1 << 3),
-	GIT_RMDIR_SKIP_ROOT       = (1 << 4),
 } git_futils_rmdir_flags;
 
 /**
@@ -164,11 +138,19 @@ typedef enum {
 extern int git_futils_rmdir_r(const char *path, const char *base, uint32_t flags);
 
 /**
+ * Remove all files and directories beneath the specified path.
+ *
+ * @param path Path to the top level directory to process.
+ * @return 0 on success; -1 on error.
+ */
+extern int git_futils_cleanupdir_r(const char *path);
+
+/**
  * Create and open a temporary file with a `_git2_` suffix.
  * Writes the filename into path_out.
  * @return On success, an open file descriptor, else an error code < 0.
  */
-extern int git_futils_mktmp(git_buf *path_out, const char *filename, mode_t mode);
+extern int git_futils_mktmp(git_buf *path_out, const char *filename);
 
 /**
  * Move a file on the filesystem, create the
@@ -200,7 +182,6 @@ extern int git_futils_cp(
  * - GIT_CPDIR_SIMPLE_TO_MODE: default tries to replicate the mode of the
  *   source file to the target; with this flag, always use 0666 (or 0777 if
  *   source has exec bits set) for target.
- * - GIT_CPDIR_LINK_FILES will try to use hardlinks for the files
  */
 typedef enum {
 	GIT_CPDIR_CREATE_EMPTY_DIRS = (1u << 0),
@@ -209,7 +190,6 @@ typedef enum {
 	GIT_CPDIR_OVERWRITE         = (1u << 3),
 	GIT_CPDIR_CHMOD_DIRS        = (1u << 4),
 	GIT_CPDIR_SIMPLE_TO_MODE    = (1u << 5),
-	GIT_CPDIR_LINK_FILES        = (1u << 6),
 } git_futils_cpdir_flags;
 
 /**
@@ -240,14 +220,9 @@ extern int git_futils_open_ro(const char *path);
  */
 extern git_off_t git_futils_filesize(git_file fd);
 
-#define GIT_PERMS_IS_EXEC(MODE)		(((MODE) & 0111) != 0)
-#define GIT_PERMS_CANONICAL(MODE)	(GIT_PERMS_IS_EXEC(MODE) ? 0755 : 0644)
-#define GIT_PERMS_FOR_WRITE(MODE)   (GIT_PERMS_IS_EXEC(MODE) ? 0777 : 0666)
-
 #define GIT_MODE_PERMS_MASK			0777
-#define GIT_MODE_TYPE_MASK			0170000
-#define GIT_MODE_TYPE(MODE)			((MODE) & GIT_MODE_TYPE_MASK)
-#define GIT_MODE_ISBLOB(MODE)		(GIT_MODE_TYPE(MODE) == GIT_MODE_TYPE(GIT_FILEMODE_BLOB))
+#define GIT_CANONICAL_PERMS(MODE)	(((MODE) & 0100) ? 0755 : 0644)
+#define GIT_MODE_TYPE(MODE)			((MODE) & ~GIT_MODE_PERMS_MASK)
 
 /**
  * Convert a mode_t from the OS to a legal git mode_t value.
@@ -265,7 +240,7 @@ extern mode_t git_futils_canonical_mode(mode_t raw_mode);
  * @param out buffer to populate with the mapping information.
  * @param fd open descriptor to configure the mapping from.
  * @param begin first byte to map, this should be page aligned.
- * @param len number of bytes to map.
+ * @param end number of bytes to map.
  * @return
  * - 0 on success;
  * - -1 on error.
@@ -297,6 +272,78 @@ extern int git_futils_mmap_ro_file(
 extern void git_futils_mmap_free(git_map *map);
 
 /**
+ * Find a "global" file (i.e. one in a user's home directory).
+ *
+ * @param pathbuf buffer to write the full path into
+ * @param filename name of file to find in the home directory
+ * @return 0 if found, GIT_ENOTFOUND if not found, or -1 on other OS error
+ */
+extern int git_futils_find_global_file(git_buf *path, const char *filename);
+
+/**
+ * Find an "XDG" file (i.e. one in user's XDG config path).
+ *
+ * @param pathbuf buffer to write the full path into
+ * @param filename name of file to find in the home directory
+ * @return 0 if found, GIT_ENOTFOUND if not found, or -1 on other OS error
+ */
+extern int git_futils_find_xdg_file(git_buf *path, const char *filename);
+
+/**
+ * Find a "system" file (i.e. one shared for all users of the system).
+ *
+ * @param pathbuf buffer to write the full path into
+ * @param filename name of file to find in the home directory
+ * @return 0 if found, GIT_ENOTFOUND if not found, or -1 on other OS error
+ */
+extern int git_futils_find_system_file(git_buf *path, const char *filename);
+
+typedef enum {
+	GIT_FUTILS_DIR_SYSTEM = 0,
+	GIT_FUTILS_DIR_GLOBAL = 1,
+	GIT_FUTILS_DIR_XDG    = 2,
+	GIT_FUTILS_DIR__MAX   = 3,
+} git_futils_dir_t;
+
+/**
+ * Get the search path for global/system/xdg files
+ *
+ * @param out pointer to git_buf containing search path
+ * @param which which list of paths to return
+ * @return 0 on success, <0 on failure
+ */
+extern int git_futils_dirs_get(const git_buf **out, git_futils_dir_t which);
+
+/**
+ * Get search path into a preallocated buffer
+ *
+ * @param out String buffer to write into
+ * @param outlen Size of string buffer
+ * @param which Which search path to return
+ * @return 0 on success, GIT_EBUFS if out is too small, <0 on other failure
+ */
+
+extern int git_futils_dirs_get_str(
+	char *out, size_t outlen, git_futils_dir_t which);
+
+/**
+ * Set search paths for global/system/xdg files
+ *
+ * The first occurrence of the magic string "$PATH" in the new value will
+ * be replaced with the old value of the search path.
+ *
+ * @param which Which search path to modify
+ * @param paths New search path (separated by GIT_PATH_LIST_SEPARATOR)
+ * @return 0 on success, <0 on failure (allocation error)
+ */
+extern int git_futils_dirs_set(git_futils_dir_t which, const char *paths);
+
+/**
+ * Release / reset all search paths
+ */
+extern void git_futils_dirs_free(void);
+
+/**
  * Create a "fake" symlink (text file containing the target path).
  *
  * @param new symlink file to be created
@@ -321,14 +368,13 @@ typedef struct {
  * Compare stat information for file with reference info.
  *
  * This function updates the file stamp to current data for the given path
- * and returns 0 if the file is up-to-date relative to the prior setting,
- * 1 if the file has been changed, or GIT_ENOTFOUND if the file doesn't
- * exist.  This will not call giterr_set, so you must set the error if you
- * plan to return an error.
+ * and returns 0 if the file is up-to-date relative to the prior setting or
+ * 1 if the file has been changed.  (This also may return GIT_ENOTFOUND if
+ * the file doesn't exist.)
  *
  * @param stamp File stamp to be checked
  * @param path Path to stat and check if changed
- * @return 0 if up-to-date, 1 if out-of-date, GIT_ENOTFOUND if cannot stat
+ * @return 0 if up-to-date, 1 if out-of-date, <0 on error
  */
 extern int git_futils_filestamp_check(
 	git_futils_filestamp *stamp, const char *path);
@@ -345,11 +391,5 @@ extern int git_futils_filestamp_check(
  */
 extern void git_futils_filestamp_set(
 	git_futils_filestamp *tgt, const git_futils_filestamp *src);
-
-/**
- * Set file stamp data from stat structure
- */
-extern void git_futils_filestamp_set_from_stat(
-	git_futils_filestamp *stamp, struct stat *st);
 
 #endif /* INCLUDE_fileops_h__ */

@@ -5,36 +5,56 @@
  * a Linking Exception. For full terms see the included COPYING file.
  */
 #define GIT__WIN32_NO_WRAP_DIR
-#include "posix.h"
+#include "dir.h"
+#include "utf-conv.h"
+
+static int init_filter(char *filter, size_t n, const char *dir)
+{
+	size_t len = strlen(dir);
+
+	if (len+3 >= n)
+		return 0;
+
+	strcpy(filter, dir);
+	if (len && dir[len-1] != '/')
+		strcat(filter, "/");
+	strcat(filter, "*");
+
+	return 1;
+}
 
 git__DIR *git__opendir(const char *dir)
 {
-	git_win32_path filter_w;
+	char filter[GIT_WIN_PATH];
+	wchar_t filter_w[GIT_WIN_PATH];
 	git__DIR *new = NULL;
-	size_t dirlen, alloclen;
 
-	if (!dir || !git_win32__findfirstfile_filter(filter_w, dir))
+	if (!dir || !init_filter(filter, sizeof(filter), dir))
 		return NULL;
 
-	dirlen = strlen(dir);
-
-	if (GIT_ADD_SIZET_OVERFLOW(&alloclen, sizeof(*new), dirlen) ||
-		GIT_ADD_SIZET_OVERFLOW(&alloclen, alloclen, 1) ||
-		!(new = git__calloc(1, alloclen)))
+	new = git__malloc(sizeof(*new));
+	if (!new)
 		return NULL;
 
-	memcpy(new->dir, dir, dirlen);
+	new->dir = git__strdup(dir);
+	if (!new->dir)
+		goto fail;
 
+	git__utf8_to_16(filter_w, GIT_WIN_PATH, filter);
 	new->h = FindFirstFileW(filter_w, &new->f);
 
 	if (new->h == INVALID_HANDLE_VALUE) {
 		giterr_set(GITERR_OS, "Could not open directory '%s'", dir);
-		git__free(new);
-		return NULL;
+		goto fail;
 	}
 
 	new->first = 1;
 	return new;
+
+fail:
+	git__free(new->dir);
+	git__free(new);
+	return NULL;
 }
 
 int git__readdir_ext(
@@ -57,10 +77,10 @@ int git__readdir_ext(
 		return -1;
 	}
 
-	/* Convert the path to UTF-8 */
-	if (git_win32_path_to_utf8(entry->d_name, d->f.cFileName) < 0)
+	if (wcslen(d->f.cFileName) >= sizeof(entry->d_name))
 		return -1;
 
+	git__utf16_to_8(entry->d_name, d->f.cFileName);
 	entry->d_ino = 0;
 
 	*result = entry;
@@ -81,7 +101,8 @@ struct git__dirent *git__readdir(git__DIR *d)
 
 void git__rewinddir(git__DIR *d)
 {
-	git_win32_path filter_w;
+	char filter[GIT_WIN_PATH];
+	wchar_t filter_w[GIT_WIN_PATH];
 
 	if (!d)
 		return;
@@ -92,9 +113,10 @@ void git__rewinddir(git__DIR *d)
 		d->first = 0;
 	}
 
-	if (!git_win32__findfirstfile_filter(filter_w, d->dir))
+	if (!init_filter(filter, sizeof(filter), d->dir))
 		return;
 
+	git__utf8_to_16(filter_w, GIT_WIN_PATH, filter);
 	d->h = FindFirstFileW(filter_w, &d->f);
 
 	if (d->h == INVALID_HANDLE_VALUE)
@@ -112,7 +134,8 @@ int git__closedir(git__DIR *d)
 		FindClose(d->h);
 		d->h = INVALID_HANDLE_VALUE;
 	}
-
+	git__free(d->dir);
+	d->dir = NULL;
 	git__free(d);
 	return 0;
 }

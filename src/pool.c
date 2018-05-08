@@ -1,5 +1,4 @@
 #include "pool.h"
-#include "posix.h"
 #ifndef GIT_WIN32
 #include <unistd.h>
 #endif
@@ -8,7 +7,7 @@ struct git_pool_page {
 	git_pool_page *next;
 	uint32_t size;
 	uint32_t avail;
-	GIT_ALIGN(char data[GIT_FLEX_ARRAY], 8);
+	char data[GIT_FLEX_ARRAY];
 };
 
 struct pool_freelist {
@@ -107,22 +106,21 @@ static void pool_insert_page(git_pool *pool, git_pool_page *page)
 static void *pool_alloc_page(git_pool *pool, uint32_t size)
 {
 	git_pool_page *page;
-	uint32_t new_page_size;
-	size_t alloc_size;
+	uint32_t alloc_size;
 
 	if (size <= pool->page_size)
-		new_page_size = pool->page_size;
+		alloc_size = pool->page_size;
 	else {
-		new_page_size = size;
+		alloc_size = size;
 		pool->has_large_page_alloc = 1;
 	}
 
-	if (GIT_ADD_SIZET_OVERFLOW(&alloc_size, new_page_size, sizeof(git_pool_page)) ||
-		!(page = git__calloc(1, alloc_size)))
+	page = git__calloc(1, alloc_size + sizeof(git_pool_page));
+	if (!page)
 		return NULL;
 
-	page->size  = new_page_size;
-	page->avail = new_page_size - size;
+	page->size  = alloc_size;
+	page->avail = alloc_size - size;
 
 	if (page->avail > 0)
 		pool_insert_page(pool, page);
@@ -148,7 +146,7 @@ GIT_INLINE(void) pool_remove_page(
 void *git_pool_malloc(git_pool *pool, uint32_t items)
 {
 	git_pool_page *scan = pool->open, *prev;
-	uint32_t size = ((items * pool->item_size) + 7) & ~7;
+	uint32_t size = items * pool->item_size;
 	void *ptr = NULL;
 
 	pool->has_string_alloc = 0;
@@ -160,7 +158,7 @@ void *git_pool_malloc(git_pool *pool, uint32_t items)
 		return ptr;
 	}
 
-	/* just add a block if there is no open one to accommodate this */
+	/* just add a block if there is no open one to accomodate this */
 	if (size >= pool->page_size || !scan || scan->avail < size)
 		return pool_alloc_page(pool, size);
 
@@ -192,18 +190,14 @@ void *git_pool_malloc(git_pool *pool, uint32_t items)
 
 char *git_pool_strndup(git_pool *pool, const char *str, size_t n)
 {
-	char *ptr = NULL;
+	void *ptr = NULL;
 
 	assert(pool && str && pool->item_size == sizeof(char));
 
-	if ((uint32_t)(n + 1) < n)
-		return NULL;
-
 	if ((ptr = git_pool_malloc(pool, (uint32_t)(n + 1))) != NULL) {
 		memcpy(ptr, str, n);
-		ptr[n] = '\0';
+		*(((char *)ptr) + n) = '\0';
 	}
-
 	pool->has_string_alloc = 1;
 
 	return ptr;
@@ -226,7 +220,7 @@ char *git_pool_strcat(git_pool *pool, const char *a, const char *b)
 	void *ptr;
 	size_t len_a, len_b;
 
-	assert(pool && pool->item_size == sizeof(char));
+	assert(pool && a && b && pool->item_size == sizeof(char));
 
 	len_a = a ? strlen(a) : 0;
 	len_b = b ? strlen(b) : 0;
@@ -307,10 +301,17 @@ uint32_t git_pool__system_page_size(void)
 	static uint32_t size = 0;
 
 	if (!size) {
-		size_t page_size;
-		if (git__page_size(&page_size) < 0)
-			page_size = 4096;
-		size = page_size - 2 * sizeof(void *); /* allow space for malloc overhead */
+#ifdef GIT_WIN32
+		SYSTEM_INFO info;
+		GetSystemInfo(&info);
+		size = (uint32_t)info.dwPageSize;
+#elif defined(__amigaos4__)
+		size = (uint32_t)4096; /* 4K as there is no global value we can query */
+#else
+		size = (uint32_t)sysconf(_SC_PAGE_SIZE);
+#endif
+
+		size -= 2 * sizeof(void *); /* allow space for malloc overhead */
 	}
 
 	return size;

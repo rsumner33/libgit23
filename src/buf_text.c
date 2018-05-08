@@ -13,7 +13,7 @@ int git_buf_text_puts_escaped(
 	const char *esc_with)
 {
 	const char *scan;
-	size_t total = 0, esc_len = strlen(esc_with), count, alloclen;
+	size_t total = 0, esc_len = strlen(esc_with), count;
 
 	if (!string)
 		return 0;
@@ -29,8 +29,7 @@ int git_buf_text_puts_escaped(
 		scan += count;
 	}
 
-	GITERR_CHECK_ALLOC_ADD(&alloclen, total, 1);
-	if (git_buf_grow_by(buf, alloclen) < 0)
+	if (git_buf_grow(buf, buf->size + total + 1) < 0)
 		return -1;
 
 	for (scan = string; *scan; ) {
@@ -66,44 +65,36 @@ int git_buf_text_crlf_to_lf(git_buf *tgt, const git_buf *src)
 	const char *scan = src->ptr;
 	const char *scan_end = src->ptr + src->size;
 	const char *next = memchr(scan, '\r', src->size);
-	size_t new_size;
 	char *out;
 
 	assert(tgt != src);
 
 	if (!next)
-		return git_buf_set(tgt, src->ptr, src->size);
+		return GIT_ENOTFOUND;
 
 	/* reduce reallocs while in the loop */
-	GITERR_CHECK_ALLOC_ADD(&new_size, src->size, 1);
-	if (git_buf_grow(tgt, new_size) < 0)
+	if (git_buf_grow(tgt, src->size) < 0)
 		return -1;
-
 	out = tgt->ptr;
 	tgt->size = 0;
 
 	/* Find the next \r and copy whole chunk up to there to tgt */
 	for (; next; scan = next + 1, next = memchr(scan, '\r', scan_end - scan)) {
 		if (next > scan) {
-			size_t copylen = (size_t)(next - scan);
+			size_t copylen = next - scan;
 			memcpy(out, scan, copylen);
 			out += copylen;
 		}
 
 		/* Do not drop \r unless it is followed by \n */
-		if (next + 1 == scan_end || next[1] != '\n')
+		if (next[1] != '\n')
 			*out++ = '\r';
 	}
 
 	/* Copy remaining input into dest */
-	if (scan < scan_end) {
-		size_t remaining = (size_t)(scan_end - scan);
-		memcpy(out, scan, remaining);
-		out += remaining;
-	}
-
-	tgt->size = (size_t)(out - tgt->ptr);
-	tgt->ptr[tgt->size] = '\0';
+	memcpy(out, scan, scan_end - scan + 1); /* +1 for NUL byte */
+	out += (scan_end - scan);
+	tgt->size = out - tgt->ptr;
 
 	return 0;
 }
@@ -114,41 +105,35 @@ int git_buf_text_lf_to_crlf(git_buf *tgt, const git_buf *src)
 	const char *end = start + src->size;
 	const char *scan = start;
 	const char *next = memchr(scan, '\n', src->size);
-	size_t alloclen;
 
 	assert(tgt != src);
 
 	if (!next)
-		return git_buf_set(tgt, src->ptr, src->size);
+		return GIT_ENOTFOUND;
 
 	/* attempt to reduce reallocs while in the loop */
-	GITERR_CHECK_ALLOC_ADD(&alloclen, src->size, src->size >> 4);
-	GITERR_CHECK_ALLOC_ADD(&alloclen, alloclen, 1);
-	if (git_buf_grow(tgt, alloclen) < 0)
+	if (git_buf_grow(tgt, src->size + (src->size >> 4) + 1) < 0)
 		return -1;
 	tgt->size = 0;
 
 	for (; next; scan = next + 1, next = memchr(scan, '\n', end - scan)) {
 		size_t copylen = next - scan;
+		/* don't convert existing \r\n to \r\r\n */
+		size_t extralen = (next > start && next[-1] == '\r') ? 1 : 2;
+		size_t needsize = tgt->size + copylen + extralen + 1;
 
-		/* if we find mixed line endings, carry on */
-		if (copylen && next[-1] == '\r')
-			copylen--;
-
-		GITERR_CHECK_ALLOC_ADD(&alloclen, copylen, 3);
-		if (git_buf_grow_by(tgt, alloclen) < 0)
+		if (tgt->asize < needsize && git_buf_grow(tgt, needsize) < 0)
 			return -1;
 
-		if (copylen) {
+		if (next > scan) {
 			memcpy(tgt->ptr + tgt->size, scan, copylen);
 			tgt->size += copylen;
 		}
-
-		tgt->ptr[tgt->size++] = '\r';
+		if (extralen == 2)
+			tgt->ptr[tgt->size++] = '\r';
 		tgt->ptr[tgt->size++] = '\n';
 	}
 
-	tgt->ptr[tgt->size] = '\0';
 	return git_buf_put(tgt, scan, end - scan);
 }
 
@@ -185,21 +170,12 @@ int git_buf_text_common_prefix(git_buf *buf, const git_strarray *strings)
 bool git_buf_text_is_binary(const git_buf *buf)
 {
 	const char *scan = buf->ptr, *end = buf->ptr + buf->size;
-	git_bom_t bom;
 	int printable = 0, nonprintable = 0;
-
-	scan += git_buf_text_detect_bom(&bom, buf, 0);
-
-	if (bom > GIT_BOM_UTF8)
-		return 1;
 
 	while (scan < end) {
 		unsigned char c = *scan++;
 
-		/* Printable characters are those above SPACE (0x1F) excluding DEL,
-		 * and including BS, ESC and FF.
-		 */
-		if ((c > 0x1F && c != 127) || c == '\b' || c == '\033' || c == '\014')
+		if (c > 0x1F && c < 0x7F)
 			printable++;
 		else if (c == '\0')
 			return true;
@@ -286,7 +262,7 @@ bool git_buf_text_gather_stats(
 	while (scan < end) {
 		unsigned char c = *scan++;
 
-		if (c > 0x1F && c != 0x7F)
+		if ((c > 0x1F && c < 0x7F) || c > 0x9f)
 			stats->printable++;
 		else switch (c) {
 			case '\0':

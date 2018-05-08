@@ -14,7 +14,7 @@
 #include "pool.h"
 #include "vector.h"
 
-#include "oidmap.h"
+GIT__USE_OIDMAP;
 
 struct git_revwalk {
 	git_repository *repo;
@@ -31,18 +31,12 @@ struct git_revwalk {
 	int (*get_next)(git_commit_list_node **, git_revwalk *);
 	int (*enqueue)(git_revwalk *, git_commit_list_node *);
 
-	unsigned walking:1,
-		first_parent: 1,
-		did_hide: 1,
-		did_push: 1;
+	unsigned walking:1;
 	unsigned int sorting;
 
-	/* the pushes and hides */
-	git_commit_list *user_input;
-
-	/* hide callback */
-	git_revwalk_hide_cb hide_cb;
-	void *hide_cb_payload;
+	/* merge base calculation */
+	git_commit_list_node *one;
+	git_vector twos;
 };
 
 git_commit_list_node *git_revwalk__commit_lookup(git_revwalk *walk, const git_oid *oid);
