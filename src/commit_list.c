@@ -100,15 +100,12 @@ git_commit_list_node *git_commit_list_pop(git_commit_list **stack)
 	return item;
 }
 
-static int commit_quick_parse(
-	git_revwalk *walk,
-	git_commit_list_node *commit,
-	const uint8_t *buffer,
-	size_t buffer_len)
+static int commit_quick_parse(git_revwalk *walk, git_commit_list_node *commit, git_rawobj *raw)
 {
 	const size_t parent_len = strlen("parent ") + GIT_OID_HEXSZ + 1;
-	const uint8_t *buffer_end = buffer + buffer_len;
-	const uint8_t *parents_start, *committer_start;
+	unsigned char *buffer = raw->data;
+	unsigned char *buffer_end = buffer + raw->len;
+	unsigned char *parents_start, *committer_start;
 	int i, parents = 0;
 	int commit_time;
 
@@ -127,7 +124,7 @@ static int commit_quick_parse(
 	for (i = 0; i < parents; ++i) {
 		git_oid oid;
 
-		if (git_oid_fromstr(&oid, (const char *)buffer + strlen("parent ")) < 0)
+		if (git_oid_fromstr(&oid, (char *)buffer + strlen("parent ")) < 0)
 			return -1;
 
 		commit->parents[i] = git_revwalk__commit_lookup(walk, &oid);
@@ -185,14 +182,11 @@ int git_commit_list_parse(git_revwalk *walk, git_commit_list_node *commit)
 	if ((error = git_odb_read(&obj, walk->odb, &commit->oid)) < 0)
 		return error;
 
-	if (obj->cached.type != GIT_OBJ_COMMIT) {
+	if (obj->raw.type != GIT_OBJ_COMMIT) {
 		giterr_set(GITERR_INVALID, "Object is no commit object");
 		error = -1;
 	} else
-		error = commit_quick_parse(
-			walk, commit,
-			(const uint8_t *)git_odb_object_data(obj),
-			git_odb_object_size(obj));
+		error = commit_quick_parse(walk, commit, &obj->raw);
 
 	git_odb_object_free(obj);
 	return error;

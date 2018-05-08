@@ -219,9 +219,8 @@ git_tree_entry *git_tree_entry_dup(const git_tree_entry *entry)
 	return copy;
 }
 
-void git_tree__free(void *_tree)
+void git_tree__free(git_tree *tree)
 {
-	git_tree *tree = _tree;
 	size_t i;
 	git_tree_entry *e;
 
@@ -230,6 +229,16 @@ void git_tree__free(void *_tree)
 
 	git_vector_free(&tree->entries);
 	git__free(tree);
+}
+
+const git_oid *git_tree_id(const git_tree *t)
+{
+	return git_object_id((const git_object *)t);
+}
+
+git_repository *git_tree_owner(const git_tree *t)
+{
+	return git_object_owner((const git_object *)t);
 }
 
 git_filemode_t git_tree_entry_filemode(const git_tree_entry *entry)
@@ -362,12 +371,8 @@ static int tree_error(const char *str, const char *path)
 	return -1;
 }
 
-int git_tree__parse(void *_tree, git_odb_object *odb_obj)
+static int tree_parse_buffer(git_tree *tree, const char *buffer, const char *buffer_end)
 {
-	git_tree *tree = _tree;
-	const char *buffer = git_odb_object_data(odb_obj);
-	const char *buffer_end = buffer + git_odb_object_size(odb_obj);
-
 	if (git_vector_init(&tree->entries, DEFAULT_TREE_SIZE, entry_sort_cmp) < 0)
 		return -1;
 
@@ -409,6 +414,12 @@ int git_tree__parse(void *_tree, git_odb_object *odb_obj)
 	}
 
 	return 0;
+}
+
+int git_tree__parse(git_tree *tree, git_odb_object *obj)
+{
+	assert(tree);
+	return tree_parse_buffer(tree, (char *)obj->raw.data, (char *)obj->raw.data + obj->raw.len);
 }
 
 static size_t find_next_dir(const char *dirname, git_index *index, size_t start)
@@ -514,6 +525,7 @@ static int write_tree(
 			/* Write out the subtree */
 			written = write_tree(&sub_oid, repo, index, subdir, i);
 			if (written < 0) {
+				tree_error("Failed to write subtree", subdir);
 				git__free(subdir);
 				goto on_error;
 			} else {

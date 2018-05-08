@@ -12,7 +12,6 @@
 #include "git2/odb.h"
 #include "git2/repository.h"
 #include "git2/object.h"
-#include "git2/config.h"
 
 #include "index.h"
 #include "cache.h"
@@ -32,13 +31,7 @@
 /** Cvar cache identifiers */
 typedef enum {
 	GIT_CVAR_AUTO_CRLF = 0, /* core.autocrlf */
-	GIT_CVAR_EOL,           /* core.eol */
-	GIT_CVAR_SYMLINKS,      /* core.symlinks */
-	GIT_CVAR_IGNORECASE,    /* core.ignorecase */
-	GIT_CVAR_FILEMODE,      /* core.filemode */
-	GIT_CVAR_IGNORESTAT,    /* core.ignorestat */
-	GIT_CVAR_TRUSTCTIME,    /* core.trustctime */
-	GIT_CVAR_ABBREV,        /* core.abbrev */
+	GIT_CVAR_EOL, /* core.eol */
 	GIT_CVAR_CACHE_MAX
 } git_cvar_cached;
 
@@ -74,21 +67,7 @@ typedef enum {
 #else
 	GIT_EOL_NATIVE = GIT_EOL_LF,
 #endif
-	GIT_EOL_DEFAULT = GIT_EOL_NATIVE,
-
-	/* core.symlinks: bool */
-	GIT_SYMLINKS_DEFAULT = GIT_CVAR_TRUE,
-	/* core.ignorecase */
-	GIT_IGNORECASE_DEFAULT = GIT_CVAR_FALSE,
-	/* core.filemode */
-	GIT_FILEMODE_DEFAULT = GIT_CVAR_TRUE,
-	/* core.ignorestat */
-	GIT_IGNORESTAT_DEFAULT = GIT_CVAR_FALSE,
-	/* core.trustctime */
-	GIT_TRUSTCTIME_DEFAULT = GIT_CVAR_TRUE,
-	/* core.abbrev */
-	GIT_ABBREV_DEFAULT = 7,
-
+	GIT_EOL_DEFAULT = GIT_EOL_NATIVE
 } git_cvar_value;
 
 /* internal repository init flags */
@@ -111,7 +90,6 @@ struct git_repository {
 
 	char *path_repository;
 	char *workdir;
-	char *namespace;
 
 	unsigned is_bare:1;
 	unsigned int lru_counter;

@@ -9,7 +9,6 @@
 #include "fileops.h"
 #include "config.h"
 #include "git2/config.h"
-#include "git2/sys/config.h"
 #include "vector.h"
 #include "buf_text.h"
 #include "config_file.h"
@@ -293,9 +292,6 @@ int git_config_refresh(git_config *cfg)
 		error = file->refresh(file);
 	}
 
-	if (!error && GIT_REFCOUNT_OWNER(cfg) != NULL)
-		git_repository__cvar_cache_clear(GIT_REFCOUNT_OWNER(cfg));
-
 	return error;
 }
 
@@ -363,7 +359,6 @@ int git_config_set_bool(git_config *cfg, const char *name, int value)
 
 int git_config_set_string(git_config *cfg, const char *name, const char *value)
 {
-	int error;
 	git_config_backend *file;
 	file_internal *internal;
 
@@ -373,20 +368,9 @@ int git_config_set_string(git_config *cfg, const char *name, const char *value)
 	}
 
 	internal = git_vector_get(&cfg->files, 0);
-	if (!internal) {
-		/* Should we auto-vivify .git/config? Tricky from this location */
-		giterr_set(GITERR_CONFIG, "Cannot set value when no config files exist");
-		return GIT_ENOTFOUND;
-	}
-
 	file = internal->file;
 
-	error = file->set(file, name, value);
-
-	if (!error && GIT_REFCOUNT_OWNER(cfg) != NULL)
-		git_repository__cvar_cache_clear(GIT_REFCOUNT_OWNER(cfg));
-
-	return error;
+	return file->set(file, name, value);
 }
 
 /***********

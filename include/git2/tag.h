@@ -30,8 +30,12 @@ GIT_BEGIN_DECL
  * @param id identity of the tag to locate.
  * @return 0 or an error code
  */
-GIT_EXTERN(int) git_tag_lookup(
-	git_tag **out, git_repository *repo, const git_oid *id);
+GIT_INLINE(int) git_tag_lookup(
+	git_tag **out, git_repository *repo, const git_oid *id)
+{
+	return git_object_lookup(
+		(git_object **)out, repo, id, (git_otype)GIT_OBJ_TAG);
+}
 
 /**
  * Lookup a tag object from the repository,
@@ -45,8 +49,12 @@ GIT_EXTERN(int) git_tag_lookup(
  * @param len the length of the short identifier
  * @return 0 or an error code
  */
-GIT_EXTERN(int) git_tag_lookup_prefix(
-	git_tag **out, git_repository *repo, const git_oid *id, size_t len);
+GIT_INLINE(int) git_tag_lookup_prefix(
+	git_tag **out, git_repository *repo, const git_oid *id, size_t len)
+{
+	return git_object_lookup_prefix(
+		(git_object **)out, repo, id, len, (git_otype)GIT_OBJ_TAG);
+}
 
 /**
  * Close an open tag
@@ -58,7 +66,12 @@ GIT_EXTERN(int) git_tag_lookup_prefix(
  *
  * @param tag the tag to close
  */
-GIT_EXTERN(void) git_tag_free(git_tag *tag);
+
+GIT_INLINE(void) git_tag_free(git_tag *tag)
+{
+	git_object_free((git_object *)tag);
+}
+
 
 /**
  * Get the id of a tag.
@@ -67,14 +80,6 @@ GIT_EXTERN(void) git_tag_free(git_tag *tag);
  * @return object identity for the tag.
  */
 GIT_EXTERN(const git_oid *) git_tag_id(const git_tag *tag);
-
-/**
- * Get the repository that contains the tag.
- *
- * @param tag A previously loaded tag.
- * @return Repository that contains this tag.
- */
-GIT_EXTERN(git_repository *) git_tag_owner(const git_tag *tag);
 
 /**
  * Get the tagged object of a tag

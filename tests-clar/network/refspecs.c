@@ -81,7 +81,4 @@ void test_network_refspecs__parsing(void)
 
 	assert_refspec(GIT_DIRECTION_FETCH, "refs/heads/*/for-linus:refs/remotes/mine/*", true);
 	assert_refspec(GIT_DIRECTION_PUSH, "refs/heads/*/for-linus:refs/remotes/mine/*", true);
-
-	assert_refspec(GIT_DIRECTION_FETCH, "master", true);
-	assert_refspec(GIT_DIRECTION_PUSH, "master", true);
 }

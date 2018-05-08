@@ -88,5 +88,4 @@ void test_refs_delete__packed_only(void)
 	/* This should pass */
 	cl_git_pass(git_reference_delete(ref));
 	git_reference_free(ref);
-	git_refdb_free(refdb);
 }

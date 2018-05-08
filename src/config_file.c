@@ -12,7 +12,6 @@
 #include "buffer.h"
 #include "buf_text.h"
 #include "git2/config.h"
-#include "git2/sys/config.h"
 #include "git2/types.h"
 #include "strmap.h"
 
@@ -482,10 +481,8 @@ static int config_set_multivar(
 
 	pos = git_strmap_lookup_index(b->values, key);
 	if (!git_strmap_valid_index(b->values, pos)) {
-		/* If we don't have it, behave like a normal set */
-		result = config_set(cfg, name, value);
 		git__free(key);
-		return result;
+		return GIT_ENOTFOUND;
 	}
 
 	var = git_strmap_value_at(b->values, pos);

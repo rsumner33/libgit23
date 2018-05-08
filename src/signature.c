@@ -69,7 +69,7 @@ int git_signature_new(git_signature **sig_out, const char *name, const char *ema
 	if (p->name == NULL || p->email == NULL ||
 		p->name[0] == '\0' || p->email[0] == '\0') {
 		git_signature_free(p);
-		return signature_error("Empty name or email");
+		return -1;
 	}
 		
 	p->when.time = time;

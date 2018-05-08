@@ -33,7 +33,6 @@ struct git_index {
 
 	git_tree_cache *tree;
 
-	git_vector names;
 	git_vector reuc;
 
 	git_vector_cmp entries_cmp_path;

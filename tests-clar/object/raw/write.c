@@ -1,6 +1,5 @@
-#include "clar_libgit2.h"
-#include "git2/odb_backend.h"
 
+#include "clar_libgit2.h"
 #include "fileops.h"
 #include "odb.h"
 
@@ -63,7 +62,6 @@ void test_body(object_data *d, git_rawobj *o)
    git_odb *db;
    git_oid id1, id2;
    git_odb_object *obj;
-   git_rawobj tmp;
 
    make_odb_dir();
    cl_git_pass(git_odb_open(&db, odb_dir));
@@ -74,12 +72,7 @@ void test_body(object_data *d, git_rawobj *o)
    check_object_files(d);
 
    cl_git_pass(git_odb_read(&obj, db, &id1));
-
-   tmp.data = obj->buffer;
-   tmp.len = obj->cached.size;
-   tmp.type = obj->cached.type;
-
-   cmp_objects(&tmp, o);
+   cmp_objects(&obj->raw, o);
 
    git_odb_object_free(obj);
    git_odb_free(db);

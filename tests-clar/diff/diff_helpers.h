@@ -18,13 +18,6 @@ typedef struct {
 	int line_ctxt;
 	int line_adds;
 	int line_dels;
-
-	/* optional arrays of expected specific values */
-	const char **names;
-	int *statuses;
-
-	int debug;
-
 } diff_expects;
 
 typedef struct {
